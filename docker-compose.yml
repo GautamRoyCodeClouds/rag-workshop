@@ -1,0 +1,24 @@
+services:
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: chromadb
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - chroma-data:/data
+    environment:
+      # Persist collections to the mounted volume instead of memory
+      IS_PERSISTENT: "TRUE"
+      PERSIST_DIRECTORY: /data
+      ANONYMIZED_TELEMETRY: "FALSE"
+    healthcheck:
+      # The image is slim (no curl), so probe the port with bash's /dev/tcp
+      test: ["CMD", "/bin/bash", "-c", "cat < /dev/null > /dev/tcp/localhost:8000"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  chroma-data:

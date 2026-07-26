@@ -1,0 +1,1858 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAG, Embeddings &amp; Vector Databases — 2 Hour Workshop</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Chivo:wght@400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+/* ============ TOKENS ============ */
+:root{
+  --bg:#0a0f1e; --panel:rgba(255,255,255,.045); --panel2:rgba(255,255,255,.075);
+  --ink:#e9eef9; --muted:#94a3c4;
+  --cyan:#38e0cf; --amber:#ffb547; --pink:#ff5c8a; --violet:#8b7cff; --green:#5ddb8b;
+  --line:rgba(255,255,255,.11); --sidebar-w:clamp(200px,17vw,268px);
+  --title-size:clamp(1.6rem,4.4vw,3.4rem);
+  --h2-size:clamp(1.15rem,2.5vw,2rem);
+  --h3-size:clamp(.95rem,1.5vw,1.25rem);
+  --body-size:clamp(.78rem,1.05vw,1.02rem);
+  --small-size:clamp(.64rem,.8vw,.8rem);
+  --code-size:clamp(.62rem,.86vw,.88rem);
+  --pad:clamp(1rem,2.6vw,3rem); --gap:clamp(.5rem,1.4vw,1.4rem); --r:14px;
+  --sans:'Chivo',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif;
+  --display:'Bricolage Grotesque','Chivo',ui-sans-serif,system-ui,sans-serif;
+  --mono:'JetBrains Mono',ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);-webkit-font-smoothing:antialiased;
+  display:grid;grid-template-columns:var(--sidebar-w) 1fr;
+  transition:grid-template-columns .3s cubic-bezier(.4,0,.2,1)}
+body.nav-hidden{grid-template-columns:0 1fr}
+body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
+  background:radial-gradient(60vw 60vw at 82% 8%,rgba(56,224,207,.10),transparent 60%),
+             radial-gradient(50vw 50vw at 6% 92%,rgba(139,124,255,.11),transparent 60%),
+             radial-gradient(40vw 40vw at 50% 50%,rgba(255,92,138,.05),transparent 70%)}
+body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;opacity:.35;
+  background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);
+  background-size:clamp(40px,4vw,64px) clamp(40px,4vw,64px);
+  -webkit-mask-image:radial-gradient(circle at 50% 40%,#000 20%,transparent 78%);
+  mask-image:radial-gradient(circle at 50% 40%,#000 20%,transparent 78%)}
+
+/* ============ SIDEBAR ============ */
+.sidebar{height:100dvh;z-index:20;min-width:0;overflow:hidden;
+  background:linear-gradient(180deg,rgba(12,18,38,.96),rgba(9,13,28,.98));
+  border-right:1px solid var(--line);display:flex;flex-direction:column}
+body.nav-hidden .sidebar{border-right-color:transparent}
+.brand{padding:clamp(.8rem,1.4vw,1.3rem);border-bottom:1px solid var(--line)}
+.brand b{display:block;font-size:clamp(.8rem,1vw,.98rem);letter-spacing:-.01em}
+.brand span{display:block;font-family:var(--mono);font-size:var(--small-size);color:var(--cyan);margin-top:.25rem}
+.toc{flex:1;overflow-y:auto;overscroll-behavior:contain;padding:.5rem .4rem 1.2rem;scrollbar-width:thin}
+.toc::-webkit-scrollbar{width:6px}
+.toc::-webkit-scrollbar-thumb{background:var(--panel2);border-radius:3px}
+.lvl-head{display:flex;align-items:center;gap:.5rem;padding:.7rem .6rem .35rem;font-family:var(--mono);
+  font-size:var(--small-size);color:var(--muted);text-transform:uppercase;letter-spacing:.09em}
+.lvl-head .dot{width:7px;height:7px;border-radius:2px;background:var(--c,var(--cyan));flex:0 0 auto}
+.lvl-head .mins{margin-left:auto;opacity:.6;letter-spacing:0}
+.toc a{display:flex;gap:.5rem;align-items:baseline;padding:.34rem .6rem;border-radius:8px;color:var(--muted);
+  text-decoration:none;font-size:var(--small-size);line-height:1.3;border-left:2px solid transparent}
+.toc a .n{font-family:var(--mono);opacity:.45;font-size:.9em;flex:0 0 auto}
+.toc a:hover{background:var(--panel);color:var(--ink)}
+.toc a.on{background:var(--panel2);color:var(--ink);border-left-color:var(--c,var(--cyan));font-weight:600}
+.toc a.demo .n::after{content:" \25CF";color:var(--amber)}
+.legend{padding:.6rem .9rem;border-top:1px solid var(--line);font-family:var(--mono);font-size:var(--small-size);
+  color:var(--muted);display:flex;flex-wrap:wrap;gap:.4rem .7rem}
+.legend kbd{background:var(--panel2);border:1px solid var(--line);border-radius:4px;padding:.05rem .3rem;color:var(--ink)}
+
+/* ============ STAGE ============ */
+.stage{flex:1;position:relative;height:100dvh;overflow:hidden;z-index:1}
+.slide{position:absolute;inset:0;padding:var(--pad);display:none;flex-direction:column;
+  justify-content:center;gap:var(--gap);overflow:hidden}
+.slide.active{display:flex;animation:in .42s cubic-bezier(.2,.7,.3,1) both}
+@keyframes in{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+.slide.active>*{animation:rise .5s cubic-bezier(.2,.7,.3,1) both}
+.slide.active>*:nth-child(1){animation-delay:.04s}
+.slide.active>*:nth-child(2){animation-delay:.10s}
+.slide.active>*:nth-child(3){animation-delay:.16s}
+.slide.active>*:nth-child(4){animation-delay:.22s}
+.slide.active>*:nth-child(5){animation-delay:.28s}
+@keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+
+/* ============ TYPE / BLOCKS ============ */
+.eyebrow{font-family:var(--mono);font-size:var(--small-size);letter-spacing:.14em;text-transform:uppercase;
+  color:var(--cyan);display:flex;align-items:center;gap:.6rem}
+.eyebrow::after{content:"";height:1px;flex:1;background:linear-gradient(90deg,var(--line),transparent)}
+h1,h2,h3{font-family:var(--display)}
+h1{font-size:var(--title-size);line-height:1.03;letter-spacing:-.03em;font-weight:800}
+h2{font-size:var(--h2-size);line-height:1.12;letter-spacing:-.02em;font-weight:700}
+h3{font-size:var(--h3-size);line-height:1.2;font-weight:700}
+p,li{font-size:var(--body-size);line-height:1.5;color:#cfd8ec}
+.lead{font-size:clamp(.86rem,1.3vw,1.2rem);color:#d7dfef;max-width:62ch}
+.muted{color:var(--muted)}
+.mono{font-family:var(--mono)}
+strong{color:#fff}
+em.hl{font-style:normal;color:var(--cyan);font-weight:600}
+ul.bullets{display:flex;flex-direction:column;gap:clamp(.3rem,.9vh,.7rem);list-style:none}
+ul.bullets li{display:flex;gap:.6rem}
+ul.bullets li::before{content:"\25B8";color:var(--cyan);flex:0 0 auto;font-size:.9em;line-height:1.6}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:clamp(.6rem,1.2vw,1.1rem);display:flex;flex-direction:column;gap:.35rem;min-width:0}
+.card p{font-size:var(--small-size);color:var(--muted);line-height:1.45}
+.card .ic{font-family:var(--mono);font-size:var(--small-size);color:var(--c,var(--cyan));letter-spacing:.08em}
+.card.accent{border-color:color-mix(in srgb,var(--c,var(--cyan)) 45%,transparent);
+  background:color-mix(in srgb,var(--c,var(--cyan)) 8%,var(--panel))}
+.grid{display:grid;gap:var(--gap);grid-template-columns:repeat(auto-fit,minmax(min(100%,190px),1fr))}
+.g2{display:grid;gap:var(--gap);grid-template-columns:1fr 1fr}
+.g3{display:grid;gap:var(--gap);grid-template-columns:repeat(3,1fr)}
+.split{display:grid;gap:calc(var(--gap)*1.4);grid-template-columns:1.05fr 1fr;align-items:center;min-height:0}
+@media (max-width:860px){.g2,.g3,.split{grid-template-columns:1fr}}
+.badge{display:inline-flex;align-items:center;gap:.4rem;font-family:var(--mono);font-size:var(--small-size);
+  padding:.2rem .55rem;border-radius:999px;border:1px solid var(--line);background:var(--panel);color:var(--muted)}
+.badge.cy{color:var(--cyan);border-color:color-mix(in srgb,var(--cyan) 40%,transparent)}
+.badge.am{color:var(--amber);border-color:color-mix(in srgb,var(--amber) 40%,transparent)}
+.badge.pk{color:var(--pink);border-color:color-mix(in srgb,var(--pink) 40%,transparent)}
+
+pre{background:#070b16;border:1px solid var(--line);border-radius:12px;padding:clamp(.55rem,1vw,1rem);overflow:hidden}
+pre code{font-family:var(--mono);font-size:var(--code-size);line-height:1.55;color:#d3ddf2;white-space:pre;display:block}
+.k{color:var(--pink)}.s{color:var(--green)}.c{color:#6b7a9c;font-style:italic}.f{color:var(--cyan)}.nm{color:var(--amber)}
+.filetab{font-family:var(--mono);font-size:var(--small-size);color:var(--muted);display:flex;gap:.5rem;align-items:center}
+.filetab::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--amber)}
+
+.demo-box{border:1px dashed color-mix(in srgb,var(--amber) 55%,transparent);
+  background:color-mix(in srgb,var(--amber) 7%,transparent);border-radius:var(--r);
+  padding:clamp(.6rem,1.1vw,1rem);display:flex;flex-direction:column;gap:.4rem;min-height:0}
+.demo-box .t{font-family:var(--mono);font-size:var(--small-size);color:var(--amber);letter-spacing:.1em;text-transform:uppercase}
+.demo-box p{font-size:var(--small-size)}
+.callout{border:1px solid color-mix(in srgb,var(--c,var(--cyan)) 32%,transparent);
+  background:color-mix(in srgb,var(--c,var(--cyan)) 6%,var(--panel));border-radius:10px;padding:.6rem .9rem}
+.callout .t{font-family:var(--mono);font-size:var(--small-size);color:var(--c,var(--cyan));letter-spacing:.08em;
+  text-transform:uppercase;margin-bottom:.2rem;display:flex;align-items:center;gap:.4rem}
+.callout .t::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--c,var(--cyan));flex:0 0 auto}
+.callout p{font-size:var(--small-size)}
+
+table{width:100%;border-collapse:collapse;font-size:var(--small-size)}
+th,td{text-align:left;padding:.4rem .55rem;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-family:var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.07em;font-weight:500;font-size:.92em}
+tr:last-child td{border-bottom:0}
+
+.pipe{display:flex;align-items:stretch;gap:.4rem;flex-wrap:wrap}
+.pipe .step{flex:1 1 0;min-width:86px;background:var(--panel);border:1px solid var(--line);border-radius:12px;
+  padding:.55rem .5rem;display:flex;flex-direction:column;gap:.2rem;transition:.25s}
+.pipe .step .num{font-family:var(--mono);font-size:.6rem;color:var(--c,var(--cyan));letter-spacing:.1em}
+.pipe .step b{font-size:var(--small-size);line-height:1.2}
+.pipe .step span.d{font-size:.62rem;color:var(--muted);line-height:1.3;font-family:var(--mono)}
+.pipe .arw{align-self:center;color:var(--muted);font-size:.9rem}
+.pipe .step.lit{border-color:var(--cyan);background:color-mix(in srgb,var(--cyan) 14%,var(--panel));
+  box-shadow:0 0 0 1px var(--cyan),0 8px 26px -14px var(--cyan)}
+
+.ctl{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center}
+button.btn{font-family:var(--mono);font-size:var(--small-size);background:var(--panel2);color:var(--ink);
+  border:1px solid var(--line);border-radius:8px;padding:.35rem .7rem;cursor:pointer;transition:.15s}
+button.btn:hover{border-color:var(--cyan);color:var(--cyan)}
+button.btn.pri{background:var(--cyan);color:#04121a;border-color:var(--cyan);font-weight:700}
+button.btn.pri:hover{filter:brightness(1.1);color:#04121a}
+button.btn.on{background:color-mix(in srgb,var(--cyan) 22%,transparent);border-color:var(--cyan);color:var(--cyan)}
+input[type=text]{font-family:var(--mono);font-size:var(--small-size);background:#070b16;border:1px solid var(--line);
+  border-radius:8px;padding:.4rem .6rem;color:var(--ink);flex:1;min-width:140px}
+input[type=text]:focus{outline:none;border-color:var(--cyan)}
+input[type=range]{accent-color:var(--cyan);width:100%}
+label.rng{display:flex;flex-direction:column;gap:.15rem;font-family:var(--mono);font-size:var(--small-size);color:var(--muted)}
+label.rng b{color:var(--cyan)}
+.sim-note{font-family:var(--mono);font-size:.62rem;color:var(--muted);opacity:.85}
+
+.hud{position:fixed;right:clamp(.6rem,1.4vw,1.4rem);bottom:clamp(.5rem,1.2vw,1.1rem);z-index:30;
+  display:flex;align-items:center;gap:.6rem;font-family:var(--mono);font-size:var(--small-size);color:var(--muted)}
+.hud .idx b{color:var(--ink)}
+.bar{position:fixed;left:0;bottom:0;height:2px;width:100%;
+  background:linear-gradient(90deg,var(--cyan),var(--violet));
+  z-index:40;transform:scaleX(0);transform-origin:left center;transition:transform .3s ease}
+.notes{position:fixed;left:0;right:0;bottom:0;z-index:35;background:rgba(6,10,22,.97);border-top:1px solid var(--amber);
+  padding:.7rem clamp(1rem,3vw,2.5rem);max-height:32vh;overflow-y:auto;transform:translateY(101%);
+  transition:transform .25s ease;font-size:var(--small-size);line-height:1.55;color:#d7dfef}
+body.notes-open .notes{transform:none}
+.notes .t{font-family:var(--mono);color:var(--amber);font-size:.65rem;letter-spacing:.12em;text-transform:uppercase;margin-bottom:.3rem}
+.navbtn{position:fixed;top:.6rem;left:.6rem;z-index:40;display:none}
+body.nav-hidden .navbtn{display:block}
+@media (max-width:760px){
+  .sidebar{position:fixed;left:0;top:0;box-shadow:0 0 60px rgba(0,0,0,.6)}
+  body:not(.nav-open) .sidebar{margin-left:calc(-1 * var(--sidebar-w))}
+  body:not(.nav-open) .navbtn{display:block}
+}
+@media (max-height:620px){.legend,.sim-note{display:none}:root{--pad:clamp(.6rem,2vw,1.2rem);--gap:.5rem}}
+/* Review mode. A 52-slide deck with code blocks and 3-column demos cannot fit a phone
+   without gutting it, so below this breakpoint slides scroll instead of clipping content
+   away invisibly. Presentation sizes (>=768px wide) still fit one viewport exactly. */
+@media (max-width:760px),(max-height:430px){
+  .slide{overflow:auto;justify-content:flex-start;-webkit-overflow-scrolling:touch}
+  .slide::-webkit-scrollbar{width:5px}
+  .slide::-webkit-scrollbar-thumb{background:var(--panel2);border-radius:3px}
+  pre{overflow-x:auto}
+  svg{max-width:100%}
+  table{font-size:.66rem}
+  .pipe .step{min-width:72px}
+}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;transition-duration:.15s!important}}
+</style>
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="brand">
+    <b>RAG, Embeddings &amp; Vector DBs</b>
+    <span>2h workshop &middot; 6 levels</span>
+  </div>
+  <nav class="toc" id="toc"></nav>
+  <div class="legend">
+    <span><kbd>&larr;</kbd><kbd>&rarr;</kbd> move</span><span><kbd>S</kbd> sidebar</span>
+    <span><kbd>N</kbd> notes</span><span><kbd>F</kbd> full</span><span><kbd>1-6</kbd> level</span>
+  </div>
+</aside>
+
+<button class="btn navbtn" id="navbtn">&#9776; Contents</button>
+
+<main class="stage" id="stage">
+
+<!-- ============ LEVEL 0 ============ -->
+<section class="slide" data-level="0" data-title="Title"
+  data-notes="Welcome. Set the frame: in two hours everyone will understand how a document becomes a vector, how retrieval finds it again, and will have seen an internal knowledge chatbot assembled piece by piece. Ask the room — who has shipped something with an LLM? Who has touched a vector DB? Calibrate depth from the hands you see.">
+  <div class="eyebrow">Level 0 &middot; Orientation</div>
+  <h1>Giving language models<br><em class="hl">something to read.</em></h1>
+  <p class="lead">RAG, embeddings and vector databases — from first principles to a working internal knowledge chatbot. Two hours, six levels, five live demos.</p>
+  <div class="ctl" style="margin-top:.4rem">
+    <span class="badge cy">Beginner &rarr; Intermediate</span>
+    <span class="badge am">5 interactive demos</span>
+    <span class="badge pk">Hands-on finish</span>
+  </div>
+</section>
+
+<section class="slide" data-level="0" data-title="Roadmap &middot; 6 levels"
+  data-notes="Walk the ladder fast — do not teach here. The point is that every level answers exactly one question and depends on the level before it. Tell them the timings are real and you intend to keep them.">
+  <div class="eyebrow">The ladder</div>
+  <h2>Six levels, each answering one question</h2>
+  <div class="grid">
+    <div class="card accent" style="--c:var(--cyan)"><span class="ic">LEVEL 1 &middot; 15 min</span><h3>Why RAG?</h3><p>What a model cannot know, and the two ways to fix it.</p></div>
+    <div class="card accent" style="--c:var(--violet)"><span class="ic">LEVEL 2 &middot; 20 min</span><h3>Embeddings</h3><p>How meaning becomes coordinates you can measure.</p></div>
+    <div class="card accent" style="--c:var(--amber)"><span class="ic">LEVEL 3 &middot; 20 min</span><h3>Chunking</h3><p>Cutting documents so retrieval has a fair chance.</p></div>
+    <div class="card accent" style="--c:var(--green)"><span class="ic">LEVEL 4 &middot; 20 min</span><h3>Vector DBs</h3><p>Pinecone, Weaviate, pgvector — storage and search.</p></div>
+    <div class="card accent" style="--c:var(--pink)"><span class="ic">LEVEL 5 &middot; 20 min</span><h3>Retrieval</h3><p>Hybrid search, reranking, prompt assembly.</p></div>
+    <div class="card accent" style="--c:#7fd4ff"><span class="ic">LEVEL 6 &middot; 20 min</span><h3>Build it</h3><p>The internal knowledge chatbot, end to end.</p></div>
+  </div>
+</section>
+
+<section class="slide" data-level="0" data-title="How this runs"
+  data-notes="Explain the three markers so nothing surprises them. Amber dashed box = stop and watch, or click. The dot in the sidebar marks demo slides. Say explicitly that questions mid-flight are welcome — this is a workshop, not a keynote.">
+  <div class="eyebrow">Ground rules</div>
+  <h2>How to read this deck</h2>
+  <div class="split">
+    <ul class="bullets">
+      <li><strong>Levels build.</strong> Nothing in level 4 lands without level 2. If you are lost, say so immediately.</li>
+      <li><strong>Amber boxes are demos.</strong> Some run right here in the browser; some I run in a terminal.</li>
+      <li><strong>Code is real but trimmed.</strong> Imports and error handling are cut for legibility, not because they are optional.</li>
+      <li><strong>Interrupt me.</strong> A confused question now saves twenty minutes later.</li>
+    </ul>
+    <div style="display:flex;flex-direction:column;gap:var(--gap)">
+      <div class="demo-box"><span class="t">&#9670; Demo</span><p>A box like this means something happens on screen. Interactive ones have buttons — click them.</p></div>
+      <div class="callout" style="--c:var(--pink)"><div class="t">Gotcha</div><p>Pink callouts are the mistakes that cost people a weekend. Screenshot these.</p></div>
+    </div>
+  </div>
+</section>
+<!-- ============ LEVEL 1 ============ -->
+<section class="slide" data-level="1" data-title="Level 1 opener"
+  data-notes="Breath point. Say what changes in this level: they arrive knowing an LLM is a chat box, they leave knowing it is a function with a fixed memory that you can hand notes to. Do not mention embeddings yet, that is level 2.">
+  <div class="eyebrow">Level 1 &middot; 15 minutes</div>
+  <div style="display:flex;align-items:baseline;gap:clamp(.8rem,2vw,2rem);flex-wrap:wrap">
+    <span style="font-family:var(--mono);font-size:clamp(3rem,11vw,9rem);line-height:.8;color:var(--cyan);opacity:.28;font-weight:700">01</span>
+    <div>
+      <h1>Why RAG<br>exists at all.</h1>
+      <p class="lead" style="margin-top:.6rem">Before we touch a vector, we need to be precise about the problem. What exactly does a language model not know, and why is retraining it the wrong reflex?</p>
+    </div>
+  </div>
+</section>
+
+<section class="slide" data-level="1" data-title="What a model cannot know"
+  data-notes="Three failure modes, and be concrete on each. Cutoff: it has never read anything after training. Private data: your Confluence was never in the training set and never will be. Confabulation: the model has no signal that separates knowing from guessing, so it produces fluent text either way. That third one is the dangerous one because the output looks identical to a correct answer.">
+  <div class="eyebrow">The problem</div>
+  <h2>Three things your model genuinely cannot know</h2>
+  <div class="g3">
+    <div class="card accent" style="--c:var(--amber)">
+      <span class="ic">01 &middot; TIME</span><h3>Anything recent</h3>
+      <p>Training stopped on a date. Yesterday's incident report, this morning's price change, last week's policy update: all invisible.</p>
+    </div>
+    <div class="card accent" style="--c:var(--pink)">
+      <span class="ic">02 &middot; ACCESS</span><h3>Anything private</h3>
+      <p>Your wiki, your tickets, your contracts, your codebase. None of it was in the training data, and you would not want it to be.</p>
+    </div>
+    <div class="card accent" style="--c:var(--violet)">
+      <span class="ic">03 &middot; SELF-DOUBT</span><h3>That it does not know</h3>
+      <p>A model produces fluent text whether or not it has the facts. Confidence is not correlated with correctness.</p>
+    </div>
+  </div>
+  <div class="callout" style="--c:var(--cyan)">
+    <div class="t">The reframe</div>
+    <p>A language model is not a database. It is a <strong>reasoning engine with a frozen, lossy memory</strong>. RAG stops asking it to remember and starts giving it something to read.</p>
+  </div>
+</section>
+
+<section class="slide" data-level="1" data-title="A concrete failure"
+  data-notes="Read the bad answer out loud in a confident voice. That is the point: it scans as authoritative. Ask the room what is wrong with it. Someone will say the number is invented. Then ask the sharper question: how would you have known, if you did not already know the real policy? You would not. That is why we retrieve.">
+  <div class="eyebrow">Watch it fail</div>
+  <h2>The failure looks exactly like a success</h2>
+  <div class="g2">
+    <div class="card" style="border-color:color-mix(in srgb,var(--pink) 40%,transparent)">
+      <span class="ic" style="--c:var(--pink)">WITHOUT RETRIEVAL</span>
+      <p class="mono" style="color:var(--muted);font-size:var(--small-size)">USER: How many annual leave days do I get?</p>
+      <p style="border-top:1px solid var(--line);padding-top:.5rem;margin-top:.2rem">You are entitled to <strong style="color:var(--pink)">20 days</strong> of paid annual leave per year, with the option to carry over up to 10 unused days.</p>
+      <p class="mono" style="color:var(--pink);font-size:.62rem">&#9888; Fluent. Specific. Entirely invented.</p>
+    </div>
+    <div class="card" style="border-color:color-mix(in srgb,var(--green) 40%,transparent)">
+      <span class="ic" style="--c:var(--green)">WITH RETRIEVAL</span>
+      <p class="mono" style="color:var(--muted);font-size:var(--small-size)">USER: How many annual leave days do I get?</p>
+      <p style="border-top:1px solid var(--line);padding-top:.5rem;margin-top:.2rem">You get <strong style="color:var(--green)">24 days</strong> of paid annual leave, accruing monthly. Up to 5 unused days carry into the next year.</p>
+      <p class="mono" style="color:var(--green);font-size:.62rem">&#10003; Grounded in HR-Policy.pdf &sect;4.1, and citable.</p>
+    </div>
+  </div>
+  <p class="lead">The second answer is not from a smarter model. It is the same model, handed the right paragraph.</p>
+</section>
+
+<section class="slide" data-level="1" data-title="Fine-tune or retrieve?"
+  data-notes="This table is the slide people photograph. The one-liner to land: fine-tuning teaches form, retrieval supplies facts. Most internal knowledge projects that reached for fine-tuning wanted retrieval. Mention that the two compose, they are not rivals, but you almost always start with retrieval because it is cheaper to build and cheaper to be wrong about.">
+  <div class="eyebrow">The fork in the road</div>
+  <h2>Two ways to give a model knowledge</h2>
+  <table>
+    <tr><th></th><th style="color:var(--violet)">Fine-tuning</th><th style="color:var(--cyan)">RAG</th></tr>
+    <tr><td><strong>What it changes</strong></td><td>The model weights</td><td>The prompt, at query time</td></tr>
+    <tr><td><strong>Good at</strong></td><td>Style, format, tone, task shape</td><td>Facts, recency, private documents</td></tr>
+    <tr><td><strong>Update cost</strong></td><td>Retrain and redeploy</td><td>Write one row to a database</td></tr>
+    <tr><td><strong>Freshness</strong></td><td>Stale the day it ships</td><td>As fresh as your last sync</td></tr>
+    <tr><td><strong>Citations</strong></td><td>Impossible</td><td>Built in, you know the source</td></tr>
+    <tr><td><strong>Access control</strong></td><td>Baked in for everyone</td><td>Filter per user at query time</td></tr>
+  </table>
+  <div class="callout" style="--c:var(--amber)">
+    <div class="t">Rule of thumb</div>
+    <p>Fine-tuning teaches the model <strong>how to speak</strong>. Retrieval tells it <strong>what is true right now</strong>. If your complaint is "it does not know our stuff", you want retrieval.</p>
+  </div>
+</section>
+
+<section class="slide" data-level="1" data-title="RAG in one sentence"
+  data-notes="Give them the sentence, then the metaphor, then make the metaphor do work. Closed book: the student recites from memory and bluffs the gaps. Open book: the student still has to reason and write the answer, but the facts come off the page. Then the punchline that sets up the next three levels: the entire engineering problem of RAG is choosing which page to open. That single line justifies levels 2, 3 and 4.">
+  <div class="eyebrow">The definition</div>
+  <h2>Retrieval-Augmented Generation</h2>
+  <p class="lead" style="font-size:clamp(1rem,1.9vw,1.6rem);color:var(--ink)">
+    Find the <em class="hl">few passages</em> most likely to answer the question, paste them into the prompt, and ask the model to answer <em class="hl">using only those</em>.
+  </p>
+  <div class="g2">
+    <div class="card"><span class="ic" style="--c:var(--pink)">CLOSED BOOK</span><h3>Plain LLM</h3><p>Recites from memory. Fills gaps with plausible invention. No way to check the work.</p></div>
+    <div class="card"><span class="ic" style="--c:var(--green)">OPEN BOOK</span><h3>RAG</h3><p>Still reasons and writes, but reads the facts off the page. You can check every claim.</p></div>
+  </div>
+  <div class="callout" style="--c:var(--cyan)">
+    <div class="t">Where the engineering lives</div>
+    <p>The model was never the hard part. <strong>Choosing which page to open is the hard part.</strong> Levels 2 to 5 are entirely about that choice.</p>
+  </div>
+</section>
+
+<section class="slide" data-level="1" data-title="Anatomy of a RAG system"
+  data-notes="Point at each box and name it in one breath. Emphasise that boxes 1 to 3 happen long before any user shows up, and boxes 4 to 8 happen in a few hundred milliseconds while they wait. Tell them we will spend a level on each of the boxes with a coloured label.">
+  <div class="eyebrow">The whole machine</div>
+  <h2>Eight boxes, and that is the entire architecture</h2>
+  <div class="pipe">
+    <div class="step" style="--c:var(--amber)"><span class="num">01</span><b>Load</b><span class="d">PDF, wiki, tickets</span></div>
+    <div class="step" style="--c:var(--amber)"><span class="num">02</span><b>Chunk</b><span class="d">L3</span></div>
+    <div class="step" style="--c:var(--violet)"><span class="num">03</span><b>Embed</b><span class="d">L2</span></div>
+    <div class="step" style="--c:var(--green)"><span class="num">04</span><b>Index</b><span class="d">L4</span></div>
+  </div>
+  <div class="pipe">
+    <div class="step" style="--c:var(--violet)"><span class="num">05</span><b>Embed query</b><span class="d">L2</span></div>
+    <div class="step" style="--c:var(--pink)"><span class="num">06</span><b>Search</b><span class="d">L5</span></div>
+    <div class="step" style="--c:var(--pink)"><span class="num">07</span><b>Rerank</b><span class="d">L5</span></div>
+    <div class="step" style="--c:var(--cyan)"><span class="num">08</span><b>Generate</b><span class="d">L6</span></div>
+  </div>
+  <p class="muted" style="font-size:var(--small-size)">Top row runs on a schedule, with no user waiting. Bottom row runs while the user watches a cursor blink.</p>
+</section>
+
+<section class="slide" data-level="1" data-title="Indexing vs querying"
+  data-notes="This distinction prevents a very common beginner bug: calling the embedding API on the whole corpus inside the request handler. Say it plainly. Indexing is a batch job you run on a schedule or a webhook. Querying is a hot path with a latency budget. Different code, different machines, different failure modes. The one thing they share is the embedding model, and it must be byte-identical on both sides.">
+  <div class="eyebrow">Two clocks</div>
+  <h2>Indexing is a batch job. Querying is a hot path.</h2>
+  <div class="g2">
+    <div class="card accent" style="--c:var(--amber)">
+      <span class="ic">OFFLINE &middot; INDEXING</span><h3>Runs on a schedule</h3>
+      <ul class="bullets" style="margin-top:.3rem">
+        <li>Minutes to hours is fine</li>
+        <li>Costs money once per document</li>
+        <li>Triggered by cron, webhook or a manual resync</li>
+        <li>Failure means stale answers, not a broken page</li>
+      </ul>
+    </div>
+    <div class="card accent" style="--c:var(--cyan)">
+      <span class="ic">ONLINE &middot; QUERYING</span><h3>Runs while they wait</h3>
+      <ul class="bullets" style="margin-top:.3rem">
+        <li>Budget is a few hundred milliseconds</li>
+        <li>Costs money once per question</li>
+        <li>Triggered by a user pressing Enter</li>
+        <li>Failure means a visibly broken product</li>
+      </ul>
+    </div>
+  </div>
+  <div class="callout" style="--c:var(--pink)">
+    <div class="t">Gotcha</div>
+    <p>The two paths must use the <strong>same embedding model</strong>. Index with one model and query with another and your similarity scores become noise. Pin the model name and dimension in config, never as a default argument.</p>
+  </div>
+</section>
+
+<section class="slide" data-level="1" data-demo data-demo-init="initRagTrace" data-title="&#9670; Demo 1 &middot; RAG trace"
+  data-notes="Drive this with the Step button and narrate. Stage 2: point out the vector is just numbers, and that we will not explain them until level 2. Stage 3: point out chunk 4 scores well on wording but is about sick leave, which foreshadows reranking in level 5. Stage 5: show that the prompt is plain text, nothing magic. Stage 6: the answer quotes a number that appears verbatim in the retrieved chunk, and that is what grounded means. Take questions here before moving to level 2.">
+  <div class="eyebrow">Demo 1 &middot; Interactive</div>
+  <h2>One question, traced end to end</h2>
+  <div class="pipe" id="rt-pipe"></div>
+  <div class="demo-box" style="flex:1;min-height:0;justify-content:flex-start">
+    <span class="t" id="rt-stage">Stage 1 of 6</span>
+    <div id="rt-body" style="min-height:0;overflow:hidden"></div>
+  </div>
+  <div class="ctl">
+    <button class="btn pri" id="rt-next">Step &rarr;</button>
+    <button class="btn" id="rt-reset">Reset</button>
+    <span class="sim-note">Vectors and scores below are illustrative fixtures, not live API output.</span>
+  </div>
+</section>
+
+<script>
+window.initRagTrace = function(root){
+  const STAGES = [
+    { name:"Query arrives", lit:[],
+      html:'<p class="mono" style="color:var(--cyan)">"How many vacation days do I get?"</p>'
+        +'<p class="muted" style="font-size:var(--small-size);margin-top:.4rem">Plain text from the user. Note the word <strong>vacation</strong>. The handbook never uses it, it says <strong>annual leave</strong>. Remember this in level 5.</p>' },
+    { name:"Embed the query", lit:[0],
+      html:'<p class="muted" style="font-size:var(--small-size)">The same embedding model that indexed the documents converts the question into one vector.</p>'
+        +'<pre style="margin-top:.4rem"><code>model  = <span class="s">"text-embedding-3-small"</span>\ndims   = <span class="nm">1536</span>\nvector = [<span class="nm">0.031</span>, <span class="nm">-0.118</span>, <span class="nm">0.442</span>, <span class="nm">0.007</span>, <span class="nm">-0.256</span>, ... ]</code></pre>' },
+    { name:"Search the index", lit:[1],
+      html:'<p class="muted" style="font-size:var(--small-size)">Compare that vector against every stored chunk vector. Keep the closest few.</p>'
+        +'<table style="margin-top:.3rem"><tr><th>Score</th><th>Chunk</th><th>Source</th></tr>'
+        +'<tr><td class="mono" style="color:var(--green)">0.89</td><td>Employees get 24 days of paid annual leave per year, accruing monthly.</td><td class="mono muted">HR &sect;4.1</td></tr>'
+        +'<tr><td class="mono" style="color:var(--green)">0.81</td><td>Unused annual leave carries over to the next year, up to 5 days.</td><td class="mono muted">HR &sect;4.2</td></tr>'
+        +'<tr><td class="mono" style="color:var(--amber)">0.62</td><td>Sick leave requires a doctor note after 3 consecutive days.</td><td class="mono muted">HR &sect;4.7</td></tr></table>' },
+    { name:"Rerank and trim", lit:[2],
+      html:'<p class="muted" style="font-size:var(--small-size)">A second, slower model rescores the candidates by actually reading them against the question. The sick-leave chunk is dropped.</p>'
+        +'<div class="g2" style="margin-top:.4rem">'
+        +'<div class="card" style="border-color:color-mix(in srgb,var(--green) 40%,transparent)"><span class="ic" style="--c:var(--green)">KEPT &middot; 2</span><p>&sect;4.1 annual leave entitlement<br>&sect;4.2 carry-over rules</p></div>'
+        +'<div class="card" style="border-color:color-mix(in srgb,var(--pink) 40%,transparent)"><span class="ic" style="--c:var(--pink)">DROPPED &middot; 1</span><p>&sect;4.7 sick leave. Similar wording, wrong topic.</p></div></div>' },
+    { name:"Assemble the prompt", lit:[3],
+      html:'<pre><code><span class="c"># system</span>\nAnswer using ONLY the context. If it is not there, say so.\nCite the section for every claim.\n\n<span class="c"># context</span>\n[HR &sect;4.1] Employees get 24 days of paid annual leave...\n[HR &sect;4.2] Unused annual leave carries over, up to 5 days.\n\n<span class="c"># user</span>\nHow many vacation days do I get?</code></pre>' },
+    { name:"Generate the answer", lit:[4],
+      html:'<p style="color:var(--ink)">You get <strong style="color:var(--green)">24 days</strong> of paid annual leave per year, accruing monthly. Up to <strong style="color:var(--green)">5</strong> unused days carry into the next year.</p>'
+        +'<p class="mono" style="font-size:.62rem;color:var(--muted);margin-top:.4rem">Sources: HR &sect;4.1, HR &sect;4.2</p>'
+        +'<p class="muted" style="font-size:var(--small-size);margin-top:.4rem">Every number in that sentence appears verbatim in the retrieved text. That is what <strong>grounded</strong> means, and it is checkable.</p>' }
+  ];
+  const NAMES = ["Query","Embed","Search","Rerank","Prompt","Answer"];
+  const pipe = root.querySelector('#rt-pipe');
+  pipe.innerHTML = NAMES.map((n,i)=>
+    '<div class="step" data-i="'+i+'"><span class="num">0'+(i+1)+'</span><b>'+n+'</b></div>').join('');
+  const steps = [...pipe.querySelectorAll('.step')];
+  let at = 0;
+  function render(){
+    const s = STAGES[at];
+    steps.forEach((el,i)=>el.classList.toggle('lit', i<=at));
+    root.querySelector('#rt-stage').textContent = 'Stage '+(at+1)+' of 6 · '+s.name;
+    root.querySelector('#rt-body').innerHTML = s.html;
+    root.querySelector('#rt-next').textContent = at===STAGES.length-1 ? 'Done' : 'Step →';
+    root.querySelector('#rt-next').disabled = at===STAGES.length-1;
+  }
+  root.querySelector('#rt-next').onclick = ()=>{ if(at<STAGES.length-1){at++;render();} };
+  root.querySelector('#rt-reset').onclick = ()=>{ at=0; render(); };
+  steps.forEach((el,i)=>el.onclick=()=>{ at=i; render(); });
+  render();
+};
+</script>
+<!-- ============ LEVEL 2 ============ -->
+<section class="slide" data-level="2" data-title="Level 2 opener"
+  data-notes="This is the conceptual heart of the whole session. If they only understand one level deeply, make it this one. Promise them that by the end of the level the phrase semantic search will stop being marketing language and start being arithmetic.">
+  <div class="eyebrow">Level 2 &middot; 20 minutes</div>
+  <div style="display:flex;align-items:baseline;gap:clamp(.8rem,2vw,2rem);flex-wrap:wrap">
+    <span style="font-family:var(--mono);font-size:clamp(3rem,11vw,9rem);line-height:.8;color:var(--violet);opacity:.28;font-weight:700">02</span>
+    <div>
+      <h1>Embeddings:<br>meaning as <em class="hl">coordinates</em>.</h1>
+      <p class="lead" style="margin-top:.6rem">By the end of this level, "semantic search" stops being a marketing phrase and becomes arithmetic you could do on paper.</p>
+    </div>
+  </div>
+</section>
+
+<section class="slide" data-level="2" data-title="From words to numbers"
+  data-notes="Start with the naive approach so the clever one has something to beat. One-hot: every word is its own dimension, all pairs equally distant, dog and puppy no closer than dog and mortgage. Useless for meaning. Then the move: learn a small dense vector per piece of text such that things used in similar contexts land in similar places. Do not explain how they are trained, that is a different course. What matters is the property they end up with.">
+  <div class="eyebrow">The representation problem</div>
+  <h2>Computers compare numbers, not meaning</h2>
+  <div class="g2">
+    <div class="card" style="border-color:color-mix(in srgb,var(--pink) 40%,transparent)">
+      <span class="ic" style="--c:var(--pink)">NAIVE &middot; ONE-HOT</span>
+      <pre style="margin-top:.3rem"><code>dog      = [<span class="nm">1</span>,<span class="nm">0</span>,<span class="nm">0</span>,<span class="nm">0</span>]
+puppy    = [<span class="nm">0</span>,<span class="nm">1</span>,<span class="nm">0</span>,<span class="nm">0</span>]
+mortgage = [<span class="nm">0</span>,<span class="nm">0</span>,<span class="nm">1</span>,<span class="nm">0</span>]</code></pre>
+      <p>Every word is equally far from every other word. <strong>dog</strong> is no closer to <strong>puppy</strong> than to <strong>mortgage</strong>. Meaning is nowhere in this.</p>
+    </div>
+    <div class="card" style="border-color:color-mix(in srgb,var(--violet) 45%,transparent)">
+      <span class="ic" style="--c:var(--violet)">LEARNED &middot; EMBEDDING</span>
+      <pre style="margin-top:.3rem"><code>dog      = [<span class="nm">0.82</span>, <span class="nm">0.40</span>]
+puppy    = [<span class="nm">0.86</span>, <span class="nm">0.33</span>]
+mortgage = [<span class="nm">-0.92</span>,<span class="nm">-0.22</span>]</code></pre>
+      <p>Trained so that text appearing in similar contexts lands in similar positions. Now <strong>closeness means relatedness</strong>, and closeness is measurable.</p>
+    </div>
+  </div>
+  <p class="lead">An embedding model is a function: text in, a fixed-length list of floats out. Same text always gives the same vector.</p>
+</section>
+
+<section class="slide" data-level="2" data-title="Meaning becomes geometry"
+  data-notes="Walk the four clusters. Then make the key observation: nobody labelled these categories. The clustering fell out of training on how words co-occur. This is why retrieval can match vacation to annual leave without a synonym list, which is the single most important practical consequence of the entire level.">
+  <div class="eyebrow">The payoff</div>
+  <h2>Related text clusters. Nobody labelled the clusters.</h2>
+  <div class="split">
+    <svg viewBox="0 0 200 200" style="width:100%;max-height:48vh" role="img" aria-label="Scatter plot showing four semantic clusters">
+      <defs><radialGradient id="gl"><stop offset="0%" stop-color="#38e0cf" stop-opacity=".35"/><stop offset="100%" stop-color="#38e0cf" stop-opacity="0"/></radialGradient></defs>
+      <line x1="100" y1="8" x2="100" y2="192" stroke="rgba(255,255,255,.12)"/>
+      <line x1="8" y1="100" x2="192" y2="100" stroke="rgba(255,255,255,.12)"/>
+      <circle cx="170" cy="66" r="34" fill="url(#gl)"/>
+      <g font-family="JetBrains Mono, monospace" font-size="7">
+        <g fill="#38e0cf"><circle cx="170" cy="66" r="2.6"/><text x="175" y="62">dog</text>
+          <circle cx="173" cy="72" r="2.6"/><text x="178" y="79">puppy</text>
+          <circle cx="164" cy="56" r="2.6"/><text x="147" y="50">cat</text></g>
+        <g fill="#ffb547"><circle cx="70" cy="25" r="2.6"/><text x="75" y="22">car</text>
+          <circle cx="62" cy="30" r="2.6"/><text x="30" y="28">truck</text>
+          <circle cx="53" cy="36" r="2.6"/><text x="16" y="41">engine</text></g>
+        <g fill="#ff5c8a"><circle cx="25" cy="126" r="2.6"/><text x="30" y="124">loan</text>
+          <circle cx="22" cy="119" r="2.6"/><text x="27" y="114">mortgage</text>
+          <circle cx="28" cy="138" r="2.6"/><text x="33" y="142">invoice</text></g>
+        <g fill="#5ddb8b"><circle cx="117" cy="178" r="2.6"/><text x="122" y="176">river</text>
+          <circle cx="124" cy="175" r="2.6"/><text x="129" y="184">stream</text></g>
+      </g>
+    </svg>
+    <div style="display:flex;flex-direction:column;gap:var(--gap)">
+      <ul class="bullets">
+        <li><strong>Pets</strong> upper right, <strong>vehicles</strong> upper left, <strong>finance</strong> lower left, <strong>water</strong> below.</li>
+        <li>No human wrote these categories. They emerged from how the words are used.</li>
+        <li>This is why a search for <em class="hl">vacation</em> can find a paragraph that only says <em class="hl">annual leave</em>.</li>
+      </ul>
+      <div class="callout" style="--c:var(--amber)">
+        <div class="t">Honest caveat</div>
+        <p>Real embeddings have 768 to 3072 dimensions, not 2. This picture is a flattened shadow of a space you cannot draw. The <em>property</em> it shows is real.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="slide" data-level="2" data-title="Measuring closeness"
+  data-notes="Do the arithmetic on the board if the room is comfortable with it. Cosine similarity is the dot product of two unit vectors, so it is literally sum of products. Range minus one to one. In practice with modern text embedding models you see roughly 0.0 to 1.0 because the vectors occupy a narrow cone. The practical instruction: normalise once at write time, then similarity is a dot product and it is very fast.">
+  <div class="eyebrow">The arithmetic</div>
+  <h2>Cosine similarity: the angle, not the distance</h2>
+  <div class="g2">
+    <div style="display:flex;flex-direction:column;gap:var(--gap)">
+      <pre><code><span class="k">def</span> <span class="f">cosine</span>(a, b):
+    dot  = <span class="f">sum</span>(x*y <span class="k">for</span> x,y <span class="k">in</span> <span class="f">zip</span>(a,b))
+    <span class="k">return</span> dot / (<span class="f">norm</span>(a) * <span class="f">norm</span>(b))
+
+<span class="c"># if vectors are already unit length:</span>
+<span class="k">def</span> <span class="f">cosine_fast</span>(a, b):
+    <span class="k">return</span> <span class="f">sum</span>(x*y <span class="k">for</span> x,y <span class="k">in</span> <span class="f">zip</span>(a,b))</code></pre>
+      <div class="callout" style="--c:var(--cyan)">
+        <div class="t">Why cosine and not distance</div>
+        <p>Cosine ignores vector length, so a two-line note and a two-page memo about the same topic still score as similar. Euclidean distance would penalise the longer one.</p>
+      </div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:.5rem">
+      <table>
+        <tr><th>Score</th><th>Reading</th></tr>
+        <tr><td class="mono" style="color:var(--green)">0.95 to 1.00</td><td>Near duplicate. Often the same sentence reworded.</td></tr>
+        <tr><td class="mono" style="color:var(--green)">0.80 to 0.95</td><td>Strongly related. This is your retrieval target zone.</td></tr>
+        <tr><td class="mono" style="color:var(--amber)">0.60 to 0.80</td><td>Same topic area. Useful, sometimes noise.</td></tr>
+        <tr><td class="mono" style="color:var(--muted)">below 0.60</td><td>Probably unrelated for most corpora.</td></tr>
+      </table>
+      <div class="callout" style="--c:var(--pink)">
+        <div class="t">Gotcha</div>
+        <p>These bands are <strong>corpus and model specific</strong>. Never hardcode a similarity threshold from a blog post. Measure it on your own data with your own questions.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="slide" data-level="2" data-demo data-demo-init="initSimLab" data-title="&#9670; Demo 2 &middot; Similarity lab"
+  data-notes="Hand this one to the room. Ask someone to predict a score before you click. Run dog versus puppy for a high score, then dog versus car for near zero, then loan versus river for a negative score. Use the negative result to be honest: in a real 1536-dimension model you rarely see negatives because the vectors sit in a narrow cone. The lesson that survives the simplification is that the number falls as topics diverge, monotonically and mechanically.">
+  <div class="eyebrow">Demo 2 &middot; Interactive</div>
+  <h2>Click two words. Watch the number.</h2>
+  <div class="split" style="align-items:stretch">
+    <svg viewBox="0 0 200 200" id="sl-svg" style="width:100%;max-height:44vh;cursor:pointer" role="img" aria-label="Interactive word vector plot"></svg>
+    <div style="display:flex;flex-direction:column;gap:.6rem;justify-content:center;min-width:0">
+      <div class="ctl">
+        <button class="btn" data-pair="dog,puppy">dog / puppy</button>
+        <button class="btn" data-pair="dog,car">dog / car</button>
+        <button class="btn" data-pair="river,stream">river / stream</button>
+        <button class="btn" data-pair="loan,river">loan / river</button>
+      </div>
+      <div class="card" style="gap:.5rem">
+        <span class="ic" style="--c:var(--violet)">COSINE SIMILARITY</span>
+        <div class="mono" id="sl-score" style="font-size:clamp(1.8rem,5vw,3.4rem);line-height:1;color:var(--cyan)">&mdash;</div>
+        <div style="height:8px;background:var(--panel2);border-radius:4px;overflow:hidden">
+          <div id="sl-bar" style="height:100%;width:0;background:linear-gradient(90deg,var(--violet),var(--cyan));transition:transform .3s ease"></div>
+        </div>
+        <p id="sl-read" style="font-size:var(--small-size)">Pick two words from the plot, or use a preset.</p>
+        <div class="mono" id="sl-math" style="font-size:.62rem;color:var(--muted)"></div>
+      </div>
+      <span class="sim-note">Toy 2D space, hand placed for teaching. Real models use 768 to 3072 dimensions.</span>
+    </div>
+  </div>
+</section>
+
+<script>
+window.initSimLab = function(root){
+  const RAW = {
+    dog:[.82,.40], puppy:[.86,.33], cat:[.75,.52], kitten:[.78,.58],
+    car:[-.35,.88], truck:[-.45,.83], engine:[-.55,.75],
+    loan:[-.88,-.30], mortgage:[-.92,-.22], invoice:[-.85,-.45],
+    river:[.20,-.92], stream:[.28,-.88]
+  };
+  const GROUP = {dog:0,puppy:0,cat:0,kitten:0,car:1,truck:1,engine:1,loan:2,mortgage:2,invoice:2,river:3,stream:3};
+  const COL = ["#38e0cf","#ffb547","#ff5c8a","#5ddb8b"];
+  const V = {};
+  for(const [w,v] of Object.entries(RAW)){
+    const n = Math.hypot(v[0],v[1]);
+    V[w] = [v[0]/n, v[1]/n];
+  }
+  const sx = x => 100 + x*80, sy = y => 100 - y*80;
+  const svg = root.querySelector('#sl-svg');
+  let sel = [];
+
+  function draw(){
+    let s = '<line x1="100" y1="10" x2="100" y2="190" stroke="rgba(255,255,255,.10)"/>'
+          + '<line x1="10" y1="100" x2="190" y2="100" stroke="rgba(255,255,255,.10)"/>'
+          + '<circle cx="100" cy="100" r="80" fill="none" stroke="rgba(255,255,255,.07)" stroke-dasharray="2 3"/>';
+    sel.forEach(w=>{
+      s += '<line x1="100" y1="100" x2="'+sx(V[w][0])+'" y2="'+sy(V[w][1])+'" stroke="'+COL[GROUP[w]]+'" stroke-width="1.4" opacity=".9"/>';
+    });
+    if(sel.length===2){
+      const mid = 26;
+      const a0=Math.atan2(-V[sel[0]][1],V[sel[0]][0]), a1=Math.atan2(-V[sel[1]][1],V[sel[1]][0]);
+      s += '<path d="M '+(100+mid*Math.cos(a0))+' '+(100+mid*Math.sin(a0))
+         + ' A '+mid+' '+mid+' 0 0 '+(((a1-a0+2*Math.PI)%(2*Math.PI))>Math.PI?0:1)+' '
+         + (100+mid*Math.cos(a1))+' '+(100+mid*Math.sin(a1))+'" fill="none" stroke="#e9eef9" stroke-width="1" opacity=".55"/>';
+    }
+    for(const w of Object.keys(V)){
+      const on = sel.includes(w);
+      const cx = sx(V[w][0]), cy = sy(V[w][1]);
+      s += '<g data-w="'+w+'" style="cursor:pointer">'
+        + '<circle cx="'+cx+'" cy="'+cy+'" r="'+(on?4:2.6)+'" fill="'+COL[GROUP[w]]+'" '+(on?'stroke="#fff" stroke-width="1"':'opacity=".8"')+'/>'
+        + '<text x="'+(cx>100?cx+5:cx-5)+'" y="'+(cy+2.5)+'" text-anchor="'+(cx>100?'start':'end')+'" '
+        + 'font-family="JetBrains Mono, monospace" font-size="6.5" fill="'+(on?'#fff':'#94a3c4')+'">'+w+'</text></g>';
+    }
+    svg.innerHTML = s;
+  }
+
+  function update(){
+    const scoreEl=root.querySelector('#sl-score'), barEl=root.querySelector('#sl-bar'),
+          readEl=root.querySelector('#sl-read'), mathEl=root.querySelector('#sl-math');
+    if(sel.length<2){
+      scoreEl.textContent='—'; barEl.style.transform='scaleX(0)';
+      readEl.textContent = sel.length===1 ? 'Selected '+sel[0]+'. Pick one more.' : 'Pick two words from the plot, or use a preset.';
+      mathEl.textContent=''; return;
+    }
+    const [a,b]=sel, va=V[a], vb=V[b];
+    const dot = va[0]*vb[0]+va[1]*vb[1];
+    scoreEl.textContent = dot.toFixed(3);
+    scoreEl.style.color = dot>.8?'#5ddb8b':dot>.5?'#38e0cf':dot>.1?'#ffb547':'#ff5c8a';
+    barEl.style.transformOrigin='left center';
+    barEl.style.width='100%';
+    barEl.style.transform='scaleX('+((dot+1)/2)+')';
+    const deg = (Math.acos(Math.max(-1,Math.min(1,dot)))*180/Math.PI).toFixed(0);
+    readEl.innerHTML = dot>.8 ? '<strong>Near duplicate.</strong> These would both be retrieved for either query.'
+      : dot>.5 ? '<strong>Related.</strong> Same neighbourhood of meaning.'
+      : dot>.1 ? '<strong>Weakly related.</strong> Roughly perpendicular, so mostly independent topics.'
+      : '<strong>Unrelated or opposed.</strong> Retrieval should never confuse these two.';
+    mathEl.textContent = 'angle ≈ '+deg+'°  ·  '+a+'·'+b+' = ('+va[0].toFixed(2)+'×'+vb[0].toFixed(2)+') + ('+va[1].toFixed(2)+'×'+vb[1].toFixed(2)+')';
+  }
+
+  function pick(w){
+    if(sel.includes(w)) sel = sel.filter(x=>x!==w);
+    else { sel.push(w); if(sel.length>2) sel.shift(); }
+    draw(); update();
+  }
+  svg.addEventListener('click',e=>{
+    const g=e.target.closest('[data-w]'); if(g) pick(g.dataset.w);
+  });
+  root.querySelectorAll('[data-pair]').forEach(b=>b.onclick=()=>{
+    sel = b.dataset.pair.split(','); draw(); update();
+    root.querySelectorAll('[data-pair]').forEach(x=>x.classList.toggle('on',x===b));
+  });
+  draw(); update();
+};
+</script>
+
+<section class="slide" data-level="2" data-title="A real embedding call"
+  data-notes="Two things to point at. First, the input can be a list, so batch it: one request with 100 chunks is far cheaper and faster than 100 requests. Second, the output length is a property of the model, not of your text. A three word query and a 400 word chunk both come back as 1536 floats, which is exactly why they are comparable.">
+  <div class="eyebrow">In practice</div>
+  <h2>What the call actually looks like</h2>
+  <div class="filetab">embed.py</div>
+  <pre><code><span class="k">from</span> openai <span class="k">import</span> OpenAI
+client = OpenAI()
+
+resp = client.embeddings.<span class="f">create</span>(
+    model=<span class="s">"text-embedding-3-small"</span>,     <span class="c"># 1536 dims, cheap</span>
+    input=[<span class="s">"annual leave policy"</span>, <span class="s">"how do I file expenses"</span>]  <span class="c"># batch!</span>
+)
+vectors = [d.embedding <span class="k">for</span> d <span class="k">in</span> resp.data]
+<span class="f">print</span>(<span class="f">len</span>(vectors), <span class="f">len</span>(vectors[<span class="nm">0</span>]))   <span class="c"># 2 1536</span></code></pre>
+  <div class="g2">
+    <div class="callout" style="--c:var(--cyan)"><div class="t">Batch it</div><p>One request with 100 inputs beats 100 requests by an order of magnitude on both latency and cost.</p></div>
+    <div class="callout" style="--c:var(--amber)"><div class="t">Fixed width</div><p>A 3 word query and a 400 word chunk both return 1536 floats. That is what makes them comparable.</p></div>
+  </div>
+</section>
+
+<section class="slide" data-level="2" data-title="Choosing a model"
+  data-notes="Do not let them agonise here. The honest advice is to start with a cheap hosted model, ship, measure, and only then consider whether a bigger or self-hosted model earns its cost. The dimension column matters because it drives your storage bill and your index memory, and because you cannot change it later without a full reindex.">
+  <div class="eyebrow">Model selection</div>
+  <h2>Which embedding model, and does it matter</h2>
+  <table>
+    <tr><th>Model</th><th>Dims</th><th>Hosting</th><th>Use when</th></tr>
+    <tr><td class="mono">text-embedding-3-small</td><td class="mono">1536</td><td>OpenAI API</td><td><strong>Default starting point.</strong> Cheap, fast, good enough for most internal corpora.</td></tr>
+    <tr><td class="mono">text-embedding-3-large</td><td class="mono">3072</td><td>OpenAI API</td><td>Measurable quality gain on hard, technical or multilingual corpora. Costs more to store.</td></tr>
+    <tr><td class="mono">voyage-3</td><td class="mono">1024</td><td>Voyage API</td><td>Strong on code and long technical documents.</td></tr>
+    <tr><td class="mono">bge-m3 / e5-large</td><td class="mono">1024</td><td>Self-host</td><td>Data cannot leave your network, or volume makes per-token pricing hurt.</td></tr>
+    <tr><td class="mono">all-MiniLM-L6-v2</td><td class="mono">384</td><td>Self-host, tiny</td><td>Prototyping on a laptop with no API key. Runs on CPU.</td></tr>
+  </table>
+  <div class="callout" style="--c:var(--pink)">
+    <div class="t">Gotcha</div>
+    <p>Changing the embedding model means <strong>reindexing every document</strong>. Dimensions and geometry both change. Treat the choice as a migration, and store the model name alongside every vector so you can tell what is stale.</p>
+  </div>
+</section>
+
+<section class="slide" data-level="2" data-title="Embedding gotchas"
+  data-notes="These four are the bugs you will actually hit. The asymmetric one is subtle and worth thirty seconds: a short question and a long answer paragraph are different kinds of text, and some models ship separate prefixes for query and document. If the model documents them, use them, because it is free accuracy. Then move to level 3.">
+  <div class="eyebrow">Before you move on</div>
+  <h2>Four ways people break this</h2>
+  <div class="g2">
+    <div class="card accent" style="--c:var(--pink)"><span class="ic">01</span><h3>Mismatched models</h3><p>Indexed with one model, queried with another. Scores become meaningless noise, and nothing throws an error.</p></div>
+    <div class="card accent" style="--c:var(--pink)"><span class="ic">02</span><h3>Forgetting to normalise</h3><p>If your database uses dot product rather than cosine, unnormalised vectors let long documents dominate every result.</p></div>
+    <div class="card accent" style="--c:var(--amber)"><span class="ic">03</span><h3>Ignoring query prefixes</h3><p>Models like <span class="mono">e5</span> and <span class="mono">bge</span> expect <span class="mono">"query: "</span> and <span class="mono">"passage: "</span> prefixes. Skipping them quietly costs accuracy.</p></div>
+    <div class="card accent" style="--c:var(--amber)"><span class="ic">04</span><h3>Embedding raw junk</h3><p>Navigation menus, cookie banners and page footers embed just fine and then pollute every result set. Clean before you embed.</p></div>
+  </div>
+</section>
+<!-- ============ LEVEL 3 ============ -->
+<section class="slide" data-level="3" data-title="Level 3 opener"
+  data-notes="Frame this as the unglamorous level that decides whether the project works. Tell them the truth: most bad RAG systems are not bad because of the model or the database, they are bad because the documents were cut in the wrong places. This is where the effort actually pays off.">
+  <div class="eyebrow">Level 3 &middot; 20 minutes</div>
+  <div style="display:flex;align-items:baseline;gap:clamp(.8rem,2vw,2rem);flex-wrap:wrap">
+    <span style="font-family:var(--mono);font-size:clamp(3rem,11vw,9rem);line-height:.8;color:var(--amber);opacity:.28;font-weight:700">03</span>
+    <div>
+      <h1>Chunking:<br>where projects <em class="hl">quietly fail</em>.</h1>
+      <p class="lead" style="margin-top:.6rem">Most disappointing RAG systems are not held back by the model or the database. They are held back by documents cut in the wrong places.</p>
+    </div>
+  </div>
+</section>
+
+<section class="slide" data-level="3" data-title="Why chunk at all"
+  data-notes="Three reasons, and the third is the one people miss. Reason three: an embedding is a single point, so embedding a 40 page handbook produces one point that means roughly nothing, an average of every topic in the document. Use the phrase semantic smoothie if the room is awake enough for it.">
+  <div class="eyebrow">The necessity</div>
+  <h2>Why we cannot just embed the whole document</h2>
+  <div class="g3">
+    <div class="card accent" style="--c:var(--amber)"><span class="ic">01 &middot; LIMITS</span><h3>Models have input caps</h3><p>Embedding models accept a few thousand tokens. A 40 page handbook does not fit, full stop.</p></div>
+    <div class="card accent" style="--c:var(--amber)"><span class="ic">02 &middot; BUDGET</span><h3>Prompts have budgets</h3><p>Even with a large context window, stuffing whole documents costs money and measurably degrades attention.</p></div>
+    <div class="card accent" style="--c:var(--pink)"><span class="ic">03 &middot; PRECISION</span><h3>One vector, one meaning</h3><p>A whole document averages into a single point that represents every topic weakly and none of them well.</p></div>
+  </div>
+  <div class="callout" style="--c:var(--pink)">
+    <div class="t">The mental image</div>
+    <p>Embedding a whole handbook is a <strong>semantic smoothie</strong>. Leave, expenses, laptops and VPN rules all blend into one bland vector that matches every query equally badly.</p>
+  </div>
+</section>
+
+<section class="slide" data-level="3" data-title="The size tradeoff"
+  data-notes="Both failure modes are real and they pull in opposite directions, which is why there is no universal answer. Too small: the answer is split across chunks and no single chunk is retrievable. Too large: the chunk is retrieved but the relevant sentence is buried in noise and the model may still miss it. The resolution is to measure on your own questions, which is exactly what level 6 evaluation covers.">
+  <div class="eyebrow">The core tension</div>
+  <h2>Too small loses context. Too large loses precision.</h2>
+  <div class="g2">
+    <div class="card" style="border-color:color-mix(in srgb,var(--pink) 40%,transparent)">
+      <span class="ic" style="--c:var(--pink)">TOO SMALL &middot; ~100 tokens</span>
+      <p style="border-left:0"><span class="mono" style="font-size:var(--small-size);color:var(--muted)">Chunk 41:</span> "...up to 5 days."</p>
+      <p>Retrieved perfectly. Utterly useless. Five days of what? The subject was in the previous chunk and the model cannot see it.</p>
+    </div>
+    <div class="card" style="border-color:color-mix(in srgb,var(--amber) 40%,transparent)">
+      <span class="ic" style="--c:var(--amber)">TOO LARGE &middot; ~2000 tokens</span>
+      <p><span class="mono" style="font-size:var(--small-size);color:var(--muted)">Chunk 3:</span> "Chapter 4: Benefits, Leave, Equipment, Travel..."</p>
+      <p>Contains the answer somewhere. Also contains four unrelated policies. Weak vector, and the model has to find the needle itself.</p>
+    </div>
+  </div>
+  <div class="callout" style="--c:var(--cyan)">
+    <div class="t">Practical starting point</div>
+    <p><strong>500 to 800 tokens per chunk, with 10 to 15 percent overlap.</strong> Then measure and adjust. This is a starting point, not an answer.</p>
+  </div>
+</section>
+
+<section class="slide" data-level="3" data-title="Five chunking strategies"
+  data-notes="Go top to bottom, they are roughly in order of increasing sophistication. Be blunt that fixed size is a baseline you should beat, and that recursive is the right default for almost everyone. Structure aware is where the real wins are if your documents have headings, because a markdown heading tree is free semantic structure that you would otherwise pay a model to infer.">
+  <div class="eyebrow">The toolkit</div>
+  <h2>Five strategies, in order of effort</h2>
+  <table>
+    <tr><th>Strategy</th><th>How it cuts</th><th>Verdict</th></tr>
+    <tr><td><strong>Fixed size</strong></td><td>Every N characters, blindly</td><td class="muted">Baseline only. Splits mid sentence and mid word.</td></tr>
+    <tr><td><strong>Recursive</strong></td><td>Try paragraph, then sentence, then word, until it fits</td><td style="color:var(--green)"><strong>The right default.</strong> Respects natural boundaries.</td></tr>
+    <tr><td><strong>Structure aware</strong></td><td>Split on markdown headings, HTML tags, code blocks</td><td style="color:var(--green)"><strong>Best value</strong> when documents have real structure.</td></tr>
+    <tr><td><strong>Semantic</strong></td><td>Embed sentences, cut where meaning shifts</td><td class="muted">Slow and costs embeddings up front. Sometimes worth it.</td></tr>
+    <tr><td><strong>Parent document</strong></td><td>Index small chunks, return their larger parent</td><td style="color:var(--cyan)"><strong>Best of both.</strong> Precise search, full context.</td></tr>
+  </table>
+  <div class="callout" style="--c:var(--cyan)">
+    <div class="t">If you only remember one</div>
+    <p>Recursive splitting on structure, with parent document retrieval when context keeps getting cut off. That combination handles most internal corpora.</p>
+  </div>
+</section>
+
+<section class="slide" data-level="3" data-demo data-demo-init="initChunkLab" data-title="&#9670; Demo 3 &middot; Chunk visualizer"
+  data-notes="Drag the size slider down to 60 and let them see sentences shredded, then read one chunk aloud to prove it is unanswerable. Drag it up to 300 and point out that a single chunk now covers three unrelated policies. Then set overlap to zero and show the boundary problem: the carry over sentence gets separated from the entitlement sentence. Bring overlap back to about 15 percent and show the seam heal. Say clearly that this demo cuts on characters for visual clarity while a real splitter respects sentence boundaries.">
+  <div class="eyebrow">Demo 3 &middot; Interactive</div>
+  <h2>Drag the sliders. Watch the document break.</h2>
+  <div class="g2" style="grid-template-columns:1.6fr 1fr;align-items:start">
+    <div style="min-width:0">
+      <div id="cl-text" style="font-family:var(--mono);font-size:clamp(.58rem,.82vw,.76rem);line-height:1.75;
+        border:1px solid var(--line);border-radius:12px;padding:.7rem;background:#070b16;max-height:46vh;overflow:hidden"></div>
+      <span class="sim-note" style="display:block;margin-top:.35rem">Cuts on character count for visual clarity. A real recursive splitter would respect sentence boundaries first.</span>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:.7rem">
+      <label class="rng">Chunk size: <b><span id="cl-size-v">160</span> chars</b>
+        <input type="range" id="cl-size" min="60" max="360" step="20" value="160"></label>
+      <label class="rng">Overlap: <b><span id="cl-ov-v">24</span> chars</b>
+        <input type="range" id="cl-ov" min="0" max="100" step="4" value="24"></label>
+      <div class="card" style="gap:.3rem">
+        <span class="ic" style="--c:var(--amber)">RESULT</span>
+        <div class="mono" style="font-size:var(--small-size);display:flex;flex-direction:column;gap:.2rem" id="cl-stats"></div>
+      </div>
+      <div id="cl-verdict" class="callout" style="--c:var(--cyan)"></div>
+    </div>
+  </div>
+</section>
+
+<script>
+window.initChunkLab = function(root){
+  const TEXT = "Employees receive 24 days of paid annual leave each year, accruing monthly from the start date. "
+    + "Unused annual leave may be carried over into the following year, up to a maximum of 5 days. "
+    + "Requests must be submitted in Workday at least 7 days before the intended start date. "
+    + "Sick leave is separate from annual leave and requires a doctor note after 3 consecutive days. "
+    + "The company reimburses home office equipment up to 500 dollars per calendar year.";
+  const PAL = ["#38e0cf","#ffb547","#8b7cff","#5ddb8b","#ff5c8a","#7fd4ff"];
+
+  function build(size, ov){
+    const step = Math.max(12, size - ov);
+    const chunks = [];
+    for(let i=0; i<TEXT.length; i+=step){
+      chunks.push([i, Math.min(i+size, TEXT.length)]);
+      if(i+size >= TEXT.length) break;
+    }
+    return chunks;
+  }
+
+  function render(){
+    const size = +root.querySelector('#cl-size').value;
+    const ov   = Math.min(+root.querySelector('#cl-ov').value, size-20);
+    root.querySelector('#cl-size-v').textContent = size;
+    root.querySelector('#cl-ov-v').textContent = ov;
+    const chunks = build(size, ov);
+
+    // per character: which chunks cover it
+    let out = '', runKey = null, runTxt = '';
+    const flush = ()=>{
+      if(runTxt==='') return;
+      if(runKey === null){ out += runTxt; }
+      else {
+        const [first, dbl] = runKey.split('|');
+        const c = PAL[(+first) % PAL.length];
+        out += '<span style="background:'+c+(dbl==='1'?'44':'26')+';color:#e9eef9;'
+             + (dbl==='1'?'border-bottom:2px solid '+c+';':'')
+             + 'border-radius:2px">'+runTxt+'</span>';
+      }
+      runTxt='';
+    };
+    for(let i=0;i<TEXT.length;i++){
+      const cover = [];
+      for(let c=0;c<chunks.length;c++) if(i>=chunks[c][0] && i<chunks[c][1]) cover.push(c);
+      const key = cover.length ? cover[0]+'|'+(cover.length>1?'1':'0') : null;
+      if(key!==runKey){ flush(); runKey=key; }
+      const ch = TEXT[i];
+      runTxt += ch==='<'?'&lt;':ch==='&'?'&amp;':ch;
+    }
+    flush();
+    root.querySelector('#cl-text').innerHTML = out;
+
+    const sizes = chunks.map(c=>c[1]-c[0]);
+    const avg = Math.round(sizes.reduce((a,b)=>a+b,0)/sizes.length);
+    root.querySelector('#cl-stats').innerHTML =
+        '<span>chunks: <b style="color:var(--amber)">'+chunks.length+'</b></span>'
+      + '<span>avg size: <b style="color:var(--amber)">'+avg+'</b> chars ≈ <b>'+Math.round(avg/4)+'</b> tokens</span>'
+      + '<span>overlap: <b style="color:var(--amber)">'+(ov?Math.round(ov/size*100):0)+'%</b></span>'
+      + '<span>embedding calls: <b style="color:var(--amber)">'+chunks.length+'</b></span>';
+
+    const v = root.querySelector('#cl-verdict');
+    if(size < 110){
+      v.style.setProperty('--c','var(--pink)');
+      v.innerHTML = '<div class="t">Too small</div><p>Sentences are being cut apart. Read a single highlight: it cannot answer a question on its own.</p>';
+    } else if(size > 300){
+      v.style.setProperty('--c','var(--amber)');
+      v.innerHTML = '<div class="t">Getting large</div><p>One chunk now spans several unrelated policies. The vector blurs and precision drops.</p>';
+    } else if(ov === 0){
+      v.style.setProperty('--c','var(--amber)');
+      v.innerHTML = '<div class="t">No overlap</div><p>Any fact sitting on a boundary is split across two chunks and may be retrievable from neither.</p>';
+    } else {
+      v.style.setProperty('--c','var(--green)');
+      v.innerHTML = '<div class="t">Reasonable</div><p>Sentence-sized units with a shared seam. Underlined text belongs to two chunks, which is what heals boundaries.</p>';
+    }
+  }
+  root.querySelector('#cl-size').addEventListener('input',render);
+  root.querySelector('#cl-ov').addEventListener('input',render);
+  render();
+};
+</script>
+
+<section class="slide" data-level="3" data-title="Chunking in code"
+  data-notes="Point at the separators list, that is the whole idea of recursive splitting. It tries to cut on the strongest boundary available and only falls back to weaker ones when a piece is still too big. Mention that length_function should be a real tokenizer rather than len, because character counts and token counts diverge badly on code and non-English text.">
+  <div class="eyebrow">In practice</div>
+  <h2>Recursive splitting, the sane default</h2>
+  <div class="filetab">chunk.py</div>
+  <pre><code><span class="k">from</span> langchain_text_splitters <span class="k">import</span> RecursiveCharacterTextSplitter
+
+splitter = <span class="f">RecursiveCharacterTextSplitter</span>(
+    chunk_size=<span class="nm">700</span>,
+    chunk_overlap=<span class="nm">100</span>,
+    separators=[<span class="s">"\n## "</span>, <span class="s">"\n\n"</span>, <span class="s">"\n"</span>, <span class="s">". "</span>, <span class="s">" "</span>],  <span class="c"># strongest first</span>
+    length_function=<span class="f">count_tokens</span>,   <span class="c"># NOT len()</span>
+)
+chunks = splitter.<span class="f">split_text</span>(doc.text)</code></pre>
+  <div class="callout" style="--c:var(--pink)">
+    <div class="t">Gotcha</div>
+    <p>The default <span class="mono">length_function</span> is <span class="mono">len</span>, which counts characters. Your model counts tokens. On code or non-English text the two diverge by a factor of two or more, and your chunks silently overflow.</p>
+  </div>
+</section>
+
+<section class="slide" data-level="3" data-title="Metadata is not optional"
+  data-notes="This is the slide that separates a demo from a product. Every chunk should carry where it came from, when it was last updated, and who is allowed to see it. Without source you cannot cite. Without a timestamp you cannot expire stale content. Without permissions you have built a data leak that answers questions politely. Say that last line slowly.">
+  <div class="eyebrow">The part beginners skip</div>
+  <h2>A chunk is text plus everything you know about it</h2>
+  <div class="split">
+    <pre><code>{
+  <span class="s">"text"</span>: <span class="s">"Employees receive 24 days..."</span>,
+  <span class="s">"source"</span>: <span class="s">"HR-Handbook-2025.pdf"</span>,
+  <span class="s">"section"</span>: <span class="s">"4.1 Annual Leave"</span>,
+  <span class="s">"page"</span>: <span class="nm">12</span>,
+  <span class="s">"updated_at"</span>: <span class="s">"2025-11-03"</span>,
+  <span class="s">"visible_to"</span>: [<span class="s">"all-staff"</span>],
+  <span class="s">"lang"</span>: <span class="s">"en"</span>
+}</code></pre>
+    <div style="display:flex;flex-direction:column;gap:var(--gap)">
+      <ul class="bullets">
+        <li><strong>source and section</strong> let you cite, which is how users learn to trust the answer.</li>
+        <li><strong>updated_at</strong> lets you prefer recent policy and expire old policy.</li>
+        <li><strong>visible_to</strong> lets you filter per user at query time.</li>
+        <li><strong>lang</strong> stops a German paragraph from answering an English question.</li>
+      </ul>
+      <div class="callout" style="--c:var(--pink)">
+        <div class="t">Say this out loud</div>
+        <p>A RAG system without permission metadata is <strong>a data leak that answers questions politely</strong>.</p>
+      </div>
+    </div>
+  </div>
+</section>
+<!-- ============ LEVEL 4 ============ -->
+<section class="slide" data-level="4" data-title="Level 4 opener"
+  data-notes="Deflate the mystique early. A vector database is a key value store with one unusual index type. That is genuinely all it is. The interesting engineering is approximate nearest neighbour search, and we will build the intuition for that without any maths.">
+  <div class="eyebrow">Level 4 &middot; 20 minutes</div>
+  <div style="display:flex;align-items:baseline;gap:clamp(.8rem,2vw,2rem);flex-wrap:wrap">
+    <span style="font-family:var(--mono);font-size:clamp(3rem,11vw,9rem);line-height:.8;color:var(--green);opacity:.28;font-weight:700">04</span>
+    <div>
+      <h1>Vector databases,<br>demystified.</h1>
+      <p class="lead" style="margin-top:.6rem">A key value store with one unusual index type. That is honestly the whole idea. The interesting part is how it searches without looking at everything.</p>
+    </div>
+  </div>
+</section>
+
+<section class="slide" data-level="4" data-title="What it stores"
+  data-notes="Four fields per record and only one of them is exotic. Stress that the text lives in the database too, because beginners often store only vectors and then have nothing to put in the prompt. Also flag that the vector and the text must stay in sync, so make the id deterministic from a content hash and you get idempotent re-indexing for free.">
+  <div class="eyebrow">Anatomy</div>
+  <h2>One record, four fields</h2>
+  <div class="g2" style="grid-template-columns:1.1fr 1fr">
+    <pre><code>{
+  <span class="s">"id"</span>: <span class="s">"hr-handbook-2025#c41"</span>,        <span class="c"># stable, dedupable</span>
+  <span class="s">"values"</span>: [<span class="nm">0.031</span>, <span class="nm">-0.118</span>, ...],     <span class="c"># the 1536 floats</span>
+  <span class="s">"metadata"</span>: {
+      <span class="s">"text"</span>: <span class="s">"Employees receive 24 days..."</span>,
+      <span class="s">"source"</span>: <span class="s">"HR-Handbook-2025.pdf"</span>,
+      <span class="s">"section"</span>: <span class="s">"4.1"</span>,
+      <span class="s">"visible_to"</span>: [<span class="s">"all-staff"</span>]
+  }
+}</code></pre>
+    <div style="display:flex;flex-direction:column;gap:var(--gap)">
+      <ul class="bullets">
+        <li><strong>id</strong> derived from a content hash makes re-indexing idempotent. Same content, same id, harmless overwrite.</li>
+        <li><strong>values</strong> is the only field that needs a special index.</li>
+        <li><strong>metadata.text</strong> matters: the database is what you read the prompt context from.</li>
+      </ul>
+      <div class="callout" style="--c:var(--pink)">
+        <div class="t">Gotcha</div>
+        <p>Storing only vectors and keeping text elsewhere means every search needs a second round trip, and the two stores drift out of sync. Keep the text next to the vector.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="slide" data-level="4" data-title="Why not brute force"
+  data-notes="Do the arithmetic out loud: ten million chunks at 1536 dimensions is about fifteen billion multiply-adds per query. Perfectly accurate, far too slow. So we accept approximation. HNSW builds a navigable graph with long-range links at the top and short local links at the bottom, so a search is a greedy walk that zooms in. The tradeoff to name explicitly is recall versus latency, tuned by how many candidates you let it consider.">
+  <div class="eyebrow">The interesting part</div>
+  <h2>Exact search is correct and far too slow</h2>
+  <div class="g2">
+    <div style="display:flex;flex-direction:column;gap:var(--gap)">
+      <div class="card" style="border-color:color-mix(in srgb,var(--pink) 40%,transparent)">
+        <span class="ic" style="--c:var(--pink)">BRUTE FORCE</span>
+        <p class="mono" style="color:var(--ink);font-size:var(--small-size)">10M chunks &times; 1536 dims<br>&asymp; 15 billion operations per query</p>
+        <p>Perfectly accurate. Hundreds of milliseconds to seconds. Unusable at scale.</p>
+      </div>
+      <div class="card" style="border-color:color-mix(in srgb,var(--green) 45%,transparent)">
+        <span class="ic" style="--c:var(--green)">APPROXIMATE &middot; HNSW</span>
+        <p class="mono" style="color:var(--ink);font-size:var(--small-size)">&asymp; a few thousand comparisons<br>single digit milliseconds</p>
+        <p>Finds the true nearest neighbours around 95 to 99 percent of the time. That is a trade worth making.</p>
+      </div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:.4rem">
+      <svg viewBox="0 0 200 150" style="width:100%;max-height:38vh" role="img" aria-label="HNSW layered graph diagram">
+        <g font-family="JetBrains Mono, monospace" font-size="6.5" fill="#94a3c4">
+          <text x="4" y="18">layer 2</text><text x="4" y="66">layer 1</text><text x="4" y="120">layer 0</text>
+        </g>
+        <g stroke="rgba(255,255,255,.14)">
+          <line x1="50" y1="22" x2="150" y2="14"/>
+          <line x1="45" y1="62" x2="95" y2="70"/><line x1="95" y1="70" x2="155" y2="58"/><line x1="45" y1="62" x2="155" y2="58"/>
+          <line x1="38" y1="116" x2="66" y2="126"/><line x1="66" y1="126" x2="92" y2="112"/><line x1="92" y1="112" x2="118" y2="130"/>
+          <line x1="118" y1="130" x2="146" y2="114"/><line x1="146" y1="114" x2="172" y2="126"/><line x1="38" y1="116" x2="92" y2="112"/>
+        </g>
+        <g stroke="#38e0cf" stroke-width="1.6" stroke-dasharray="3 2" fill="none">
+          <path d="M50 22 L150 14"/><path d="M150 14 L155 58"/><path d="M155 58 L146 114"/>
+        </g>
+        <g fill="#5ddb8b">
+          <circle cx="50" cy="22" r="3"/><circle cx="150" cy="14" r="3"/>
+          <circle cx="45" cy="62" r="2.6"/><circle cx="95" cy="70" r="2.6"/><circle cx="155" cy="58" r="2.6"/>
+          <circle cx="38" cy="116" r="2.2"/><circle cx="66" cy="126" r="2.2"/><circle cx="92" cy="112" r="2.2"/>
+          <circle cx="118" cy="130" r="2.2"/><circle cx="172" cy="126" r="2.2"/>
+        </g>
+        <circle cx="146" cy="114" r="3.4" fill="#38e0cf" stroke="#fff" stroke-width="1"/>
+        <text x="152" y="112" font-family="JetBrains Mono, monospace" font-size="6" fill="#38e0cf">match</text>
+        <text x="52" y="14" font-family="JetBrains Mono, monospace" font-size="6" fill="#38e0cf">start</text>
+      </svg>
+      <p class="muted" style="font-size:var(--small-size)">Enter at the sparse top layer, take long hops toward the target, then drop down and refine locally. A greedy walk, not a scan.</p>
+    </div>
+  </div>
+</section>
+
+<section class="slide" data-level="4" data-title="The knobs that matter"
+  data-notes="Four knobs. Metric must match how you trained and normalised. Dimensions are fixed by the model and cannot be changed without reindexing. top_k is what you retrieve, and the honest advice is retrieve more than you send, then rerank down. ef_search is the recall dial: raise it and you get better recall and slower queries. That is the whole tuning story.">
+  <div class="eyebrow">Configuration</div>
+  <h2>Four settings, and everything else is a default</h2>
+  <table>
+    <tr><th>Knob</th><th>Typical</th><th>What it controls</th></tr>
+    <tr><td class="mono">metric</td><td class="mono">cosine</td><td>How similarity is computed. Must match how you normalised your vectors.</td></tr>
+    <tr><td class="mono">dimensions</td><td class="mono">1536</td><td>Fixed by your embedding model. Changing it means a full reindex.</td></tr>
+    <tr><td class="mono">top_k</td><td class="mono">20 &rarr; rerank to 4</td><td>Candidates fetched. Retrieve generously, then narrow with a reranker.</td></tr>
+    <tr><td class="mono">ef_search</td><td class="mono">64 to 256</td><td>How hard HNSW looks. Higher means better recall and slower queries.</td></tr>
+  </table>
+  <div class="callout" style="--c:var(--cyan)">
+    <div class="t">The one number to internalise</div>
+    <p>Retrieve <strong>more candidates than you intend to use</strong>. Fetching 20 and reranking to 4 beats fetching 4 directly, almost every time, for a few milliseconds of cost.</p>
+  </div>
+</section>
+
+<section class="slide" data-level="4" data-title="The landscape"
+  data-notes="Give them permission not to care too much. The API surface is nearly identical everywhere: upsert, query, filter. The real decision drivers are operational, not technical. If your data already lives in Postgres, use pgvector and skip a whole piece of infrastructure. Say plainly that starting with pgvector or Chroma and migrating later is a perfectly respectable plan, because the migration is a reindex and reindexing is a solved problem.">
+  <div class="eyebrow">Tool choice</div>
+  <h2>Five options, mostly the same API</h2>
+  <div class="grid">
+    <div class="card accent" style="--c:var(--green)"><span class="ic">PINECONE</span><h3>Fully managed</h3><p>No servers to run, scales without thought, serverless pricing. You are renting, and your data lives there.</p></div>
+    <div class="card accent" style="--c:var(--cyan)"><span class="ic">WEAVIATE</span><h3>Hybrid native</h3><p>Keyword and vector search in one query, built in. Self-host or cloud. Strong schema and module system.</p></div>
+    <div class="card accent" style="--c:var(--violet)"><span class="ic">PGVECTOR</span><h3>Just Postgres</h3><p>An extension on the database you already run. Join vectors against your real tables. Usually the pragmatic answer.</p></div>
+    <div class="card accent" style="--c:var(--amber)"><span class="ic">CHROMA</span><h3>Local first</h3><p><span class="mono">pip install</span> and go. Perfect for prototypes and this workshop. Not what you run in production at scale.</p></div>
+    <div class="card accent" style="--c:var(--pink)"><span class="ic">QDRANT</span><h3>Rust, filter heavy</h3><p>Excellent filtered search performance and quantization. Self-host friendly.</p></div>
+    <div class="card"><span class="ic" style="--c:var(--muted)">ALSO</span><h3>Milvus, LanceDB, Elastic</h3><p>All viable. Elastic and OpenSearch matter if you already run them for logs.</p></div>
+  </div>
+</section>
+
+<section class="slide" data-level="4" data-title="Code &middot; Pinecone"
+  data-notes="Read the shape rather than the syntax. Upsert takes a list of records, query takes a vector plus a filter plus a k. That triple is the entire interface of every vector database on the previous slide. Point out include_metadata, because forgetting it returns ids with no text and people lose twenty minutes to it.">
+  <div class="eyebrow">In practice</div>
+  <h2>Write, then read</h2>
+  <div class="filetab">index_pinecone.py</div>
+  <pre><code>index = pc.<span class="f">Index</span>(<span class="s">"company-kb"</span>)
+
+index.<span class="f">upsert</span>(vectors=[
+    {<span class="s">"id"</span>: <span class="s">"hr#c41"</span>, <span class="s">"values"</span>: vec,
+     <span class="s">"metadata"</span>: {<span class="s">"text"</span>: chunk, <span class="s">"source"</span>: <span class="s">"HR.pdf"</span>, <span class="s">"dept"</span>: <span class="s">"hr"</span>}},
+])
+
+res = index.<span class="f">query</span>(
+    vector=<span class="f">embed</span>(<span class="s">"how many vacation days"</span>),
+    top_k=<span class="nm">20</span>,
+    filter={<span class="s">"dept"</span>: {<span class="s">"$in"</span>: [<span class="s">"hr"</span>, <span class="s">"general"</span>]}},   <span class="c"># pre-filter</span>
+    include_metadata=<span class="k">True</span>,          <span class="c"># or you get ids and no text</span>
+)</code></pre>
+  <p class="muted" style="font-size:var(--small-size)">Every database on the previous slide exposes this same triple: a vector, a filter, and a <span class="mono">k</span>.</p>
+</section>
+
+<section class="slide" data-level="4" data-title="Code &middot; Weaviate hybrid"
+  data-notes="This is the slide that foreshadows level 5. Weaviate does hybrid in a single call with one alpha parameter, where alpha one is pure vector and alpha zero is pure keyword. Tell them 0.5 to 0.75 is the usual sweet spot and that we will explain exactly what is being blended in the next level.">
+  <div class="eyebrow">In practice</div>
+  <h2>Weaviate: keyword and vector in one call</h2>
+  <div class="filetab">query_weaviate.py</div>
+  <pre><code>kb = client.collections.<span class="f">get</span>(<span class="s">"CompanyKB"</span>)
+
+res = kb.query.<span class="f">hybrid</span>(
+    query=<span class="s">"how many vacation days do I get"</span>,   <span class="c"># used for BM25 AND vector</span>
+    alpha=<span class="nm">0.6</span>,                  <span class="c"># 1.0 = pure vector, 0.0 = pure keyword</span>
+    limit=<span class="nm">20</span>,
+    filters=Filter.<span class="f">by_property</span>(<span class="s">"dept"</span>).<span class="f">equal</span>(<span class="s">"hr"</span>),
+    return_metadata=MetadataQuery(score=<span class="k">True</span>),
+)</code></pre>
+  <div class="callout" style="--c:var(--amber)">
+    <div class="t">Coming next</div>
+    <p><span class="mono">alpha</span> blends two completely different search methods. Level 5 explains what they are, why blending beats either alone, and why 0.6 is a reasonable first guess.</p>
+  </div>
+</section>
+
+<section class="slide" data-level="4" data-demo data-demo-init="initFilterLab" data-title="&#9670; Demo 4 &middot; Metadata filtering"
+  data-notes="Start with no filters and point out that the top match is a finance document that this user should never see. Then click the contractor role and watch the restricted rows drop out. That is access control, enforced before search rather than after. Then click the 2025 only chip to show freshness filtering. The teaching point to land at the end: filtering happens before similarity, so an aggressive filter with a small k can return nothing at all, and your code must handle the empty result.">
+  <div class="eyebrow">Demo 4 &middot; Interactive</div>
+  <h2>Filter first, then search</h2>
+  <div class="ctl">
+    <span class="mono" style="font-size:var(--small-size);color:var(--muted)">viewer role:</span>
+    <button class="btn on" data-role="staff">all-staff</button>
+    <button class="btn" data-role="contractor">contractor</button>
+    <button class="btn" data-role="finance">finance</button>
+    <span class="mono" style="font-size:var(--small-size);color:var(--muted);margin-left:.5rem">filters:</span>
+    <button class="btn" data-f="recent">updated 2025 only</button>
+    <button class="btn" data-f="hr">dept = hr</button>
+  </div>
+  <div id="fl-rows" style="display:flex;flex-direction:column;gap:.25rem;min-height:0"></div>
+  <div class="g2">
+    <div class="card" style="gap:.2rem"><span class="ic" style="--c:var(--green)">CANDIDATE SET</span>
+      <div class="mono" id="fl-stats" style="font-size:var(--small-size)"></div></div>
+    <div id="fl-warn" class="callout" style="--c:var(--cyan)"></div>
+  </div>
+</section>
+
+<script>
+window.initFilterLab = function(root){
+  const ROWS = [
+    {t:"Employees receive 24 days of paid annual leave...", dept:"hr", yr:2025, vis:["all-staff"], s:.89},
+    {t:"Unused annual leave carries over, up to 5 days.", dept:"hr", yr:2025, vis:["all-staff"], s:.81},
+    {t:"Contractor engagements are capped at 11 months.", dept:"hr", yr:2024, vis:["all-staff","contractor"], s:.74},
+    {t:"Q4 severance provisions and payout schedule.", dept:"finance", yr:2025, vis:["finance"], s:.86},
+    {t:"Executive compensation bands, band 7 to band 9.", dept:"finance", yr:2023, vis:["finance"], s:.72},
+    {t:"Home office equipment is reimbursed up to 500 dollars.", dept:"hr", yr:2025, vis:["all-staff"], s:.68},
+    {t:"Travel expenses must be filed within 30 days.", dept:"finance", yr:2024, vis:["all-staff"], s:.64},
+    {t:"VPN is required on public Wi-Fi networks.", dept:"it", yr:2025, vis:["all-staff","contractor"], s:.41}
+  ];
+  let role = "staff", fRecent = false, fHr = false;
+  const roleVis = {staff:"all-staff", contractor:"contractor", finance:"finance"};
+
+  function passes(r){
+    if(!r.vis.includes(roleVis[role])) return "permission";
+    if(fRecent && r.yr !== 2025) return "stale";
+    if(fHr && r.dept !== "hr") return "dept";
+    return null;
+  }
+  function render(){
+    const kept = [];
+    root.querySelector('#fl-rows').innerHTML = ROWS.map(r=>{
+      const fail = passes(r);
+      if(!fail) kept.push(r);
+      const col = r.dept==="hr" ? "var(--cyan)" : r.dept==="finance" ? "var(--pink)" : "var(--amber)";
+      return '<div style="display:flex;gap:.5rem;align-items:center;padding:.3rem .5rem;border-radius:8px;'
+        + 'border:1px solid '+(fail?'transparent':'var(--line)')+';background:'+(fail?'transparent':'var(--panel)')+';'
+        + 'opacity:'+(fail?'.28':'1')+';transition:opacity .25s ease">'
+        + '<span class="mono" style="font-size:var(--small-size);color:'+(fail?'var(--muted)':'var(--green)')+';width:2.6rem;flex:0 0 auto">'+r.s.toFixed(2)+'</span>'
+        + '<span style="font-size:var(--small-size);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+r.t+'</span>'
+        + '<span class="badge" style="color:'+col+';border-color:'+col+'55;flex:0 0 auto">'+r.dept+'</span>'
+        + '<span class="mono" style="font-size:.62rem;color:var(--muted);width:2.4rem;flex:0 0 auto">'+r.yr+'</span>'
+        + '<span class="mono" style="font-size:.62rem;width:5rem;flex:0 0 auto;color:'+(fail?'var(--pink)':'var(--green)')+'">'
+        + (fail?'✕ '+fail:'✓ eligible')+'</span></div>';
+    }).join('');
+
+    root.querySelector('#fl-stats').innerHTML =
+        '<span>eligible: <b style="color:var(--green)">'+kept.length+'</b> of '+ROWS.length+'</span><br>'
+      + '<span>top match: <b style="color:var(--cyan)">'+(kept.length?kept[0].s.toFixed(2)+' · '+kept[0].dept:'none')+'</b></span>';
+
+    const w = root.querySelector('#fl-warn');
+    if(!kept.length){
+      w.style.setProperty('--c','var(--pink)');
+      w.innerHTML = '<div class="t">Empty result set</div><p>The filter eliminated everything. Your code must handle this and say it does not know, rather than passing an empty context to the model.</p>';
+    } else if(role==="staff" && !fHr && !fRecent){
+      w.style.setProperty('--c','var(--pink)');
+      w.innerHTML = '<div class="t">Look at row 4</div><p>A finance document scoring 0.86 is excluded by permissions, not by similarity. Vector search alone would have leaked it.</p>';
+    } else if(fRecent){
+      w.style.setProperty('--c','var(--green)');
+      w.innerHTML = '<div class="t">Freshness filter</div><p>Superseded policy is now unreachable. This is how you stop a 2023 handbook from answering a 2026 question.</p>';
+    } else {
+      w.style.setProperty('--c','var(--cyan)');
+      w.innerHTML = '<div class="t">Pre-filter</div><p>Filtering runs <strong>before</strong> similarity search, so restricted rows never enter the candidate pool at all.</p>';
+    }
+  }
+  root.querySelectorAll('[data-role]').forEach(b=>b.onclick=()=>{
+    role=b.dataset.role;
+    root.querySelectorAll('[data-role]').forEach(x=>x.classList.toggle('on',x===b));
+    render();
+  });
+  root.querySelectorAll('[data-f]').forEach(b=>b.onclick=()=>{
+    if(b.dataset.f==='recent') fRecent=!fRecent; else fHr=!fHr;
+    b.classList.toggle('on');
+    render();
+  });
+  render();
+};
+</script>
+<!-- ============ LEVEL 5 ============ -->
+<section class="slide" data-level="5" data-title="Level 5 opener"
+  data-notes="Set expectations: naive similarity search gets you to a demo, and everything in this level is what gets you from a demo to something people trust. If they implement only one thing from the whole session after they leave, it should be hybrid search, because it is the highest ratio of quality gained to effort spent.">
+  <div class="eyebrow">Level 5 &middot; 20 minutes</div>
+  <div style="display:flex;align-items:baseline;gap:clamp(.8rem,2vw,2rem);flex-wrap:wrap">
+    <span style="font-family:var(--mono);font-size:clamp(3rem,11vw,9rem);line-height:.8;color:var(--pink);opacity:.28;font-weight:700">05</span>
+    <div>
+      <h1>Retrieval:<br>from demo to <em class="hl">trustworthy</em>.</h1>
+      <p class="lead" style="margin-top:.6rem">Plain similarity search gets you a demo. Hybrid search, reranking and careful prompt assembly get you something people rely on.</p>
+    </div>
+  </div>
+</section>
+
+<section class="slide" data-level="5" data-title="The retrieval pipeline"
+  data-notes="Five stages, and note the funnel shape in the numbers: thousands of chunks down to twenty candidates down to four passages. Each stage is cheaper per item than the next is expensive, which is exactly why the funnel is shaped this way. Cheap and broad first, expensive and narrow last.">
+  <div class="eyebrow">The funnel</div>
+  <h2>Five stages, narrowing at every step</h2>
+  <div class="pipe">
+    <div class="step" style="--c:var(--violet)"><span class="num">01</span><b>Transform</b><span class="d">rewrite the query</span></div>
+    <div class="step" style="--c:var(--pink)"><span class="num">02</span><b>Retrieve</b><span class="d">dense + sparse</span></div>
+    <div class="step" style="--c:var(--pink)"><span class="num">03</span><b>Fuse</b><span class="d">merge rankings</span></div>
+    <div class="step" style="--c:var(--amber)"><span class="num">04</span><b>Rerank</b><span class="d">cross-encoder</span></div>
+    <div class="step" style="--c:var(--cyan)"><span class="num">05</span><b>Assemble</b><span class="d">build the prompt</span></div>
+  </div>
+  <div class="g3">
+    <div class="card"><span class="ic" style="--c:var(--muted)">CORPUS</span><h3>10,000+ chunks</h3><p>Everything you indexed.</p></div>
+    <div class="card"><span class="ic" style="--c:var(--pink)">CANDIDATES</span><h3>20 to 50</h3><p>Cheap search, generous recall. Precision does not matter yet.</p></div>
+    <div class="card"><span class="ic" style="--c:var(--cyan)">CONTEXT</span><h3>3 to 5 passages</h3><p>Expensive scoring, high precision. This is what the model reads.</p></div>
+  </div>
+  <p class="muted" style="font-size:var(--small-size)">Cheap and broad first, expensive and narrow last. Never invert this order.</p>
+</section>
+
+<section class="slide" data-level="5" data-title="Dense vs sparse"
+  data-notes="Both methods have a failure mode that the other one covers, which is the entire argument for hybrid. Dense misses exact rare tokens: error codes, SKUs, surnames, product names, because they get smeared into a general neighbourhood. Sparse misses paraphrase entirely. Ask the room for examples from their own domain, part numbers and ticket ids come up quickly.">
+  <div class="eyebrow">Two kinds of search</div>
+  <h2>Each one fails where the other succeeds</h2>
+  <div class="g2">
+    <div class="card accent" style="--c:var(--violet)">
+      <span class="ic">DENSE &middot; EMBEDDINGS</span><h3>Matches meaning</h3>
+      <ul class="bullets" style="margin-top:.2rem">
+        <li>Finds <span class="mono">annual leave</span> when you ask about <span class="mono">vacation</span></li>
+        <li>Handles paraphrase, synonyms and other languages</li>
+        <li class="muted">Fails on exact rare tokens: <span class="mono">ERR_4021</span>, <span class="mono">SKU-88X</span>, surnames</li>
+      </ul>
+    </div>
+    <div class="card accent" style="--c:var(--amber)">
+      <span class="ic">SPARSE &middot; BM25</span><h3>Matches words</h3>
+      <ul class="bullets" style="margin-top:.2rem">
+        <li>Nails exact identifiers, codes, names and quoted phrases</li>
+        <li>Cheap, explainable, needs no model and no GPU</li>
+        <li class="muted">Fails completely on paraphrase. No shared word means no match</li>
+      </ul>
+    </div>
+  </div>
+  <div class="callout" style="--c:var(--cyan)">
+    <div class="t">Therefore</div>
+    <p>Run <strong>both</strong>, then merge the two ranked lists. This is the single highest value upgrade to a naive RAG system, and it takes about an hour to add.</p>
+  </div>
+</section>
+
+<section class="slide" data-level="5" data-title="Hybrid search &amp; RRF"
+  data-notes="Explain why you cannot just add the two scores: BM25 is unbounded and cosine sits between zero and one, so summing them lets BM25 dominate arbitrarily. Reciprocal rank fusion sidesteps the problem by throwing away the scores and keeping only the ranks. The constant 60 is from the original paper and it dampens the influence of the very top positions. Anything a document ranks well on in either list survives.">
+  <div class="eyebrow">Merging rankings</div>
+  <h2>Reciprocal Rank Fusion: ignore the scores, keep the ranks</h2>
+  <div class="g2">
+    <div style="display:flex;flex-direction:column;gap:var(--gap)">
+      <div class="callout" style="--c:var(--pink)">
+        <div class="t">Why not just add the scores</div>
+        <p>BM25 returns unbounded values like 14.7. Cosine returns 0.83. Add them and BM25 silently decides every result.</p>
+      </div>
+      <pre><code><span class="k">def</span> <span class="f">rrf</span>(rankings, k=<span class="nm">60</span>):
+    scores = <span class="f">defaultdict</span>(float)
+    <span class="k">for</span> ranked_list <span class="k">in</span> rankings:
+        <span class="k">for</span> rank, doc_id <span class="k">in</span> <span class="f">enumerate</span>(ranked_list):
+            scores[doc_id] += <span class="nm">1</span> / (k + rank + <span class="nm">1</span>)
+    <span class="k">return</span> <span class="f">sorted</span>(scores, key=scores.get, reverse=<span class="k">True</span>)</code></pre>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:.5rem">
+      <table>
+        <tr><th>Doc</th><th>Dense rank</th><th>BM25 rank</th><th>RRF</th></tr>
+        <tr><td class="mono">A</td><td class="mono">1</td><td class="mono">—</td><td class="mono" style="color:var(--amber)">0.0164</td></tr>
+        <tr><td class="mono">B</td><td class="mono">2</td><td class="mono">3</td><td class="mono" style="color:var(--green)">0.0320</td></tr>
+        <tr><td class="mono">C</td><td class="mono">—</td><td class="mono">1</td><td class="mono" style="color:var(--amber)">0.0164</td></tr>
+      </table>
+      <div class="callout" style="--c:var(--green)">
+        <div class="t">Read the table</div>
+        <p><strong>B wins</strong> without topping either list, because it is the only document both methods agree on. Agreement is a strong signal, and RRF is how you cash it in.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="slide" data-level="5" data-demo data-demo-init="initHybridLab" data-title="&#9670; Demo 5 &middot; Hybrid search lab"
+  data-notes="This is the centrepiece demo, give it real time. Click vacation days first: keyword flails because the word vacation is nowhere in the corpus, semantic nails it. Then click Expensify: now keyword wins outright because it is a rare exact token and semantic only knows it is expense shaped. Then new starter hardware: keyword finds nothing useful, semantic finds the laptop chunk. Finally point at the hybrid column each time and observe it is never the worst of the two. That is the entire argument. Let them type their own queries.">
+  <div class="eyebrow">Demo 5 &middot; Interactive</div>
+  <h2>Same query, three retrieval methods</h2>
+  <div class="ctl">
+    <input type="text" id="hl-q" value="how many vacation days do I get" aria-label="Search query">
+    <button class="btn pri" id="hl-go">Search</button>
+  </div>
+  <div class="ctl">
+    <button class="btn" data-q="how many vacation days do I get">vacation days</button>
+    <button class="btn" data-q="expensify">expensify</button>
+    <button class="btn" data-q="new starter hardware">new starter hardware</button>
+    <button class="btn" data-q="can I roll over unused holiday">roll over holiday</button>
+  </div>
+  <div class="g3" style="min-height:0;align-items:start">
+    <div><div class="ic mono" style="--c:var(--amber);color:var(--amber);font-size:var(--small-size);margin-bottom:.3rem">SPARSE &middot; BM25</div><div id="hl-kw"></div></div>
+    <div><div class="ic mono" style="--c:var(--violet);color:var(--violet);font-size:var(--small-size);margin-bottom:.3rem">DENSE &middot; SEMANTIC</div><div id="hl-sem"></div></div>
+    <div><div class="ic mono" style="--c:var(--green);color:var(--green);font-size:var(--small-size);margin-bottom:.3rem">HYBRID &middot; RRF</div><div id="hl-hy"></div></div>
+  </div>
+  <div id="hl-verdict" class="callout" style="--c:var(--cyan)"></div>
+  <span class="sim-note">BM25 is computed for real. The dense column is a deterministic concept-overlap stand-in for a live embedding model, so it behaves like semantic search without a network call.</span>
+</section>
+
+<script>
+window.initHybridLab = function(root){
+  const DOCS = [
+    {id:"HR §4.1", t:"Employees receive 24 days of paid annual leave each year, accruing monthly.", c:["leave"]},
+    {id:"HR §4.2", t:"Unused annual leave carries over into the next year, up to 5 days.", c:["leave","carryover"]},
+    {id:"HR §4.3", t:"Leave requests must be submitted in Workday at least 7 days in advance.", c:["leave","request"]},
+    {id:"HR §4.7", t:"Sick leave requires a doctor note after 3 consecutive days.", c:["sick","leave"]},
+    {id:"FIN §2.1", t:"Home office equipment is reimbursed up to 500 dollars per year.", c:["equipment","expense"]},
+    {id:"FIN §3.4", t:"Travel expenses must be filed within 30 days using Expensify.", c:["expense"]},
+    {id:"IT §1.2", t:"New laptops are issued on your first day by the IT helpdesk.", c:["equipment","it","onboarding"]},
+    {id:"IT §5.6", t:"VPN access is required when connecting from public Wi-Fi.", c:["it"]}
+  ];
+  // concept lexicon: term -> concepts. Stands in for what an embedding model learns implicitly.
+  const LEX = {
+    leave:["leave"], annual:["leave"], vacation:["leave"], holiday:["leave"], pto:["leave"],
+    days:["leave"], off:["leave"], entitlement:["leave"],
+    carry:["carryover"], carryover:["carryover"], unused:["carryover"], rollover:["carryover"], roll:["carryover"],
+    request:["request"], submit:["request"], apply:["request"], workday:["request"], book:["request"], advance:["request"],
+    sick:["sick"], doctor:["sick"], ill:["sick"], illness:["sick"], note:["sick"],
+    equipment:["equipment"], laptop:["equipment"], laptops:["equipment"], monitor:["equipment"], desk:["equipment"],
+    hardware:["equipment"], chair:["equipment"], home:["equipment"], office:["equipment"],
+    expense:["expense"], expenses:["expense"], travel:["expense"], reimburse:["expense"], reimbursed:["expense"],
+    expensify:["expense"], claim:["expense"], receipt:["expense"], file:["expense"], filed:["expense"], dollars:["expense"],
+    vpn:["it"], wifi:["it"], network:["it"], security:["it"], helpdesk:["it"], it:["it"],
+    starter:["onboarding"], new:["onboarding"], first:["onboarding"], joining:["onboarding"], onboarding:["onboarding"], start:["onboarding"]
+  };
+  const STOP = new Set(["how","many","do","i","get","the","a","an","of","to","in","is","are","can","my","for","and","on","at","per","up","with","from"]);
+  const tok = s => s.toLowerCase().split(/[^a-z0-9]+/).filter(w=>w && !STOP.has(w));
+
+  // ---- BM25 (real) ----
+  const N = DOCS.length, k1 = 1.5, b = 0.75;
+  const dTok = DOCS.map(d=>tok(d.t));
+  const avgdl = dTok.reduce((a,t)=>a+t.length,0)/N;
+  const df = {};
+  dTok.forEach(t=>new Set(t).forEach(w=>df[w]=(df[w]||0)+1));
+  function bm25(q){
+    const qt = tok(q);
+    return DOCS.map((d,i)=>{
+      let s=0;
+      qt.forEach(w=>{
+        const n = df[w]; if(!n) return;
+        const tf = dTok[i].filter(x=>x===w).length; if(!tf) return;
+        const idf = Math.log(1 + (N-n+0.5)/(n+0.5));
+        s += idf * (tf*(k1+1))/(tf + k1*(1-b+b*dTok[i].length/avgdl));
+      });
+      return {d, s};
+    }).filter(r=>r.s>0).sort((a,b)=>b.s-a.s);
+  }
+
+  // ---- dense stand-in: cosine over concept vectors ----
+  const CONCEPTS = ["leave","carryover","request","sick","equipment","expense","it","onboarding"];
+  const vecOf = concepts => {
+    const v = CONCEPTS.map(c=>concepts.filter(x=>x===c).length);
+    const n = Math.hypot(...v) || 1;
+    return v.map(x=>x/n);
+  };
+  const docVecs = DOCS.map(d=>vecOf(d.c));
+  function dense(q){
+    const qc = tok(q).flatMap(w=>LEX[w]||[]);
+    if(!qc.length) return [];
+    const qv = vecOf(qc);
+    return DOCS.map((d,i)=>({d, s: qv.reduce((a,x,j)=>a+x*docVecs[i][j],0)}))
+               .filter(r=>r.s>0.01).sort((a,b)=>b.s-a.s);
+  }
+
+  function rrf(lists, k=60){
+    const acc = new Map();
+    lists.forEach(L=>L.forEach((r,i)=>acc.set(r.d, (acc.get(r.d)||0) + 1/(k+i+1))));
+    return [...acc.entries()].map(([d,s])=>({d,s})).sort((a,b)=>b.s-a.s);
+  }
+
+  function paint(el, list, col, dec){
+    if(!list.length){
+      el.innerHTML = '<p class="mono" style="font-size:.66rem;color:var(--pink);padding:.4rem">no matches at all</p>';
+      return;
+    }
+    el.innerHTML = list.slice(0,4).map((r,i)=>
+      '<div style="display:flex;gap:.4rem;align-items:baseline;padding:.28rem .45rem;margin-bottom:.22rem;'
+      + 'border:1px solid '+(i===0?col+'66':'var(--line)')+';border-radius:8px;'
+      + 'background:'+(i===0?col+'14':'var(--panel)')+'">'
+      + '<span class="mono" style="font-size:.6rem;color:'+col+';flex:0 0 auto">'+r.s.toFixed(dec)+'</span>'
+      + '<span style="font-size:.68rem;line-height:1.3;min-width:0"><b class="mono" style="font-size:.9em;color:var(--muted)">'
+      + r.d.id+'</b> '+r.d.t.slice(0,58)+(r.d.t.length>58?'…':'')+'</span></div>').join('');
+  }
+
+  function run(){
+    const q = root.querySelector('#hl-q').value.trim();
+    const kw = bm25(q), sem = dense(q);
+    const hy = rrf([kw, sem].filter(l=>l.length));
+    paint(root.querySelector('#hl-kw'), kw, '#ffb547', 2);
+    paint(root.querySelector('#hl-sem'), sem, '#8b7cff', 3);
+    paint(root.querySelector('#hl-hy'), hy, '#5ddb8b', 4);
+
+    const v = root.querySelector('#hl-verdict');
+    const topK = kw[0]?.d.id, topS = sem[0]?.d.id, topH = hy[0]?.d.id;
+    if(!kw.length && sem.length){
+      v.style.setProperty('--c','var(--violet)');
+      v.innerHTML = '<div class="t">Dense wins outright</div><p>Not one query word appears in the corpus, so BM25 has nothing to score. Semantic matching still finds the right passage. This is the paraphrase gap.</p>';
+    } else if(kw.length && !sem.length){
+      v.style.setProperty('--c','var(--amber)');
+      v.innerHTML = '<div class="t">Sparse wins outright</div><p>A rare exact token that the concept model has no notion of. Embeddings smear identifiers like this into a vague neighbourhood, keyword search lands it precisely.</p>';
+    } else if(topK && topS && topK !== topS){
+      v.style.setProperty('--c','var(--green)');
+      v.innerHTML = '<div class="t">The two methods disagree</div><p>BM25 ranks <b class="mono">'+topK+'</b> first, semantic ranks <b class="mono">'+topS+'</b>. RRF settles it on <b class="mono">'+topH+'</b> by rewarding whatever both lists rate highly.</p>';
+    } else if(topK){
+      v.style.setProperty('--c','var(--green)');
+      v.innerHTML = '<div class="t">Both agree on <b class="mono">'+topH+'</b></div><p>Agreement between two independent methods is the strongest retrieval signal you get. RRF pushes it further clear of the rest.</p>';
+    } else {
+      v.style.setProperty('--c','var(--pink)');
+      v.innerHTML = '<div class="t">Nothing found</div><p>Both methods came back empty. In production this is the moment to say you do not know, not to hand the model an empty context.</p>';
+    }
+  }
+  root.querySelector('#hl-go').onclick = run;
+  root.querySelector('#hl-q').addEventListener('keydown',e=>{ if(e.key==='Enter'){e.stopPropagation(); run();} });
+  root.querySelectorAll('[data-q]').forEach(b=>b.onclick=()=>{
+    root.querySelector('#hl-q').value = b.dataset.q;
+    root.querySelectorAll('[data-q]').forEach(x=>x.classList.toggle('on',x===b));
+    run();
+  });
+  run();
+};
+</script>
+
+<section class="slide" data-level="5" data-title="Reranking"
+  data-notes="The distinction is worth being precise about. A bi-encoder embeds the query and the document separately, so it never compares them directly, which is what makes it fast enough to precompute for millions of chunks. A cross-encoder reads the pair together and outputs a relevance score, which is far more accurate and far too slow to run over a whole corpus. So you use the fast one to get twenty candidates and the accurate one to order them. Cheap and broad, then expensive and narrow, again.">
+  <div class="eyebrow">The accuracy upgrade</div>
+  <h2>Rerank: read the pair, do not just compare points</h2>
+  <div class="g2">
+    <div class="card accent" style="--c:var(--violet)">
+      <span class="ic">BI-ENCODER &middot; RETRIEVAL</span><h3>Embed separately</h3>
+      <p class="mono" style="font-size:var(--small-size);color:var(--ink)">vec(query) &middot; vec(doc)</p>
+      <p>Document vectors are precomputed, so search is milliseconds over millions of chunks. Query and document are never compared directly.</p>
+    </div>
+    <div class="card accent" style="--c:var(--amber)">
+      <span class="ic">CROSS-ENCODER &middot; RERANK</span><h3>Read together</h3>
+      <p class="mono" style="font-size:var(--small-size);color:var(--ink)">score(query, doc)</p>
+      <p>The model sees both texts at once and judges relevance directly. Much more accurate, far too slow for a whole corpus.</p>
+    </div>
+  </div>
+  <pre><code>candidates = <span class="f">hybrid_search</span>(query, k=<span class="nm">25</span>)          <span class="c"># fast, generous</span>
+ranked     = cohere.<span class="f">rerank</span>(query=query, documents=candidates,
+                            model=<span class="s">"rerank-v3.5"</span>, top_n=<span class="nm">4</span>)  <span class="c"># slow, precise</span></code></pre>
+  <p class="muted" style="font-size:var(--small-size)">Typically the largest single quality jump after hybrid search, for roughly 100 to 200ms of added latency.</p>
+</section>
+
+<section class="slide" data-level="5" data-title="Query transformation"
+  data-notes="Point out that the user question is often a bad search query, and that all four techniques are about repairing it before search. The follow-up rewrite is not optional in a chat product, because what about contractors is unanswerable without the previous turn. Multi-query is the cheapest real win. HyDE is clever but mention it costs an extra generation per query, so measure before adopting.">
+  <div class="eyebrow">Fixing the question</div>
+  <h2>The user's question is often a poor search query</h2>
+  <table>
+    <tr><th>Technique</th><th>Before</th><th>After</th></tr>
+    <tr><td><strong>Follow-up rewrite</strong></td><td class="mono muted">"what about contractors?"</td><td class="mono">"what is the annual leave entitlement for contractors"</td></tr>
+    <tr><td><strong>Multi-query</strong></td><td class="mono muted">"laptop policy"</td><td class="mono">3 variants searched in parallel, results fused with RRF</td></tr>
+    <tr><td><strong>HyDE</strong></td><td class="mono muted">"vpn rules"</td><td class="mono">generate a fake ideal answer, embed <em>that</em>, search with it</td></tr>
+    <tr><td><strong>Decomposition</strong></td><td class="mono muted">"compare leave and sick policy"</td><td class="mono">two sub-questions, retrieved separately, answered together</td></tr>
+  </table>
+  <div class="callout" style="--c:var(--pink)">
+    <div class="t">Gotcha</div>
+    <p>In a chat product the follow-up rewrite is <strong>not optional</strong>. Embedding "what about contractors?" on its own retrieves noise, because the actual subject only exists in the previous turn.</p>
+  </div>
+</section>
+
+<section class="slide" data-level="5" data-title="Prompt assembly"
+  data-notes="Four things in the prompt and every one of them earns its place. The refusal instruction is what converts a confident liar into a system that says it does not know. Numbered sources make citations checkable and make the model far more likely to actually attribute. Putting the question last matters because models attend most strongly to the beginning and end of a long context. Say explicitly that this prompt is the interface between everything they just built and the answer the user reads.">
+  <div class="eyebrow">The last mile</div>
+  <h2>The prompt is where retrieval becomes an answer</h2>
+  <div class="filetab">prompt.py</div>
+  <pre><code>SYSTEM = <span class="s">"""Answer using ONLY the numbered context below.</span>
+<span class="s">Cite every claim as [1], [2]. If the context does not contain</span>
+<span class="s">the answer, say exactly: "I could not find this in our docs.""""</span>
+
+context = <span class="s">"\n\n"</span>.<span class="f">join</span>(
+    <span class="s">f"[{i}] ({c.source} §{c.section})\n{c.text}"</span>
+    <span class="k">for</span> i, c <span class="k">in</span> <span class="f">enumerate</span>(chunks, <span class="nm">1</span>)
+)
+messages = [{<span class="s">"role"</span>:<span class="s">"system"</span>, <span class="s">"content"</span>: SYSTEM},
+            {<span class="s">"role"</span>:<span class="s">"user"</span>, <span class="s">"content"</span>: <span class="s">f"{context}\n\nQuestion: {question}"</span>}]</code></pre>
+  <div class="g3">
+    <div class="callout" style="--c:var(--green)"><div class="t">Refusal path</div><p>An explicit escape hatch is what stops confident invention.</p></div>
+    <div class="callout" style="--c:var(--cyan)"><div class="t">Numbered sources</div><p>Makes citations easy to emit and easy to verify.</p></div>
+    <div class="callout" style="--c:var(--amber)"><div class="t">Question last</div><p>Models attend most strongly to the start and end of long context.</p></div>
+  </div>
+</section>
+<!-- ============ LEVEL 6 ============ -->
+<section class="slide" data-level="6" data-title="Level 6 opener"
+  data-notes="Switch mode here. Everything so far was concepts, this is assembly. If you are running this live, have the terminal open and the repo cloned before the session starts. If a live run is risky, walk the code and show a recorded result instead. Either is fine, but decide in advance rather than improvising.">
+  <div class="eyebrow">Level 6 &middot; 20 minutes</div>
+  <div style="display:flex;align-items:baseline;gap:clamp(.8rem,2vw,2rem);flex-wrap:wrap">
+    <span style="font-family:var(--mono);font-size:clamp(3rem,11vw,9rem);line-height:.8;color:#7fd4ff;opacity:.28;font-weight:700">06</span>
+    <div>
+      <h1>Hands on:<br>the knowledge <em class="hl">chatbot</em>.</h1>
+      <p class="lead" style="margin-top:.6rem">Everything from levels 1 to 5, wired into about eighty lines of Python. Then the part nobody demos: measuring whether it actually works.</p>
+    </div>
+  </div>
+</section>
+
+<section class="slide" data-level="6" data-title="Architecture"
+  data-notes="Trace the two paths with a finger. Ingest on top runs on a schedule, chat below runs per question. Point out that the only shared component is the vector store, which is exactly the boundary you should build first because everything else plugs into it. Mention that for a first version you can start with Chroma on a laptop and swap the store later without touching the rest.">
+  <div class="eyebrow">What we are building</div>
+  <h2>Two paths, one store</h2>
+  <div class="card" style="gap:.5rem">
+    <span class="ic" style="--c:var(--amber)">INGEST &middot; SCHEDULED</span>
+    <div class="pipe">
+      <div class="step" style="--c:var(--amber)"><span class="num">01</span><b>Confluence, PDFs, tickets</b></div>
+      <div class="step" style="--c:var(--amber)"><span class="num">02</span><b>Clean &amp; split</b><span class="d">700 tok / 100 overlap</span></div>
+      <div class="step" style="--c:var(--violet)"><span class="num">03</span><b>Embed batched</b><span class="d">3-small, 1536</span></div>
+      <div class="step" style="--c:var(--green)"><span class="num">04</span><b>Upsert + metadata</b></div>
+    </div>
+  </div>
+  <div class="card" style="gap:.5rem;border-color:color-mix(in srgb,var(--cyan) 35%,transparent)">
+    <span class="ic" style="--c:var(--cyan)">CHAT &middot; PER QUESTION</span>
+    <div class="pipe">
+      <div class="step" style="--c:var(--violet)"><span class="num">05</span><b>Rewrite w/ history</b></div>
+      <div class="step" style="--c:var(--pink)"><span class="num">06</span><b>Hybrid + filter</b><span class="d">k=25</span></div>
+      <div class="step" style="--c:var(--amber)"><span class="num">07</span><b>Rerank</b><span class="d">top 4</span></div>
+      <div class="step" style="--c:var(--cyan)"><span class="num">08</span><b>Answer + cite</b></div>
+    </div>
+  </div>
+  <p class="muted" style="font-size:var(--small-size)">The vector store is the only shared component, which makes it the right thing to build first.</p>
+</section>
+
+<section class="slide" data-level="6" data-title="Code &middot; Ingest"
+  data-notes="Two details worth calling out. The doc id is a content hash, so re-running ingest on unchanged documents is a harmless no-op and you can safely run it on a cron. And extra_info is where all the metadata from level 3 gets attached, which is what makes filtering and citation possible later. Run this live if you can and show the chunk count.">
+  <div class="eyebrow">Step 1 of 3</div>
+  <h2>Ingest: documents in, vectors out</h2>
+  <div class="filetab">ingest.py</div>
+  <pre><code>splitter = <span class="f">SentenceSplitter</span>(chunk_size=<span class="nm">700</span>, chunk_overlap=<span class="nm">100</span>)
+store    = <span class="f">ChromaVectorStore</span>(chroma_collection=collection)
+
+nodes = []
+<span class="k">for</span> path <span class="k">in</span> <span class="f">Path</span>(<span class="s">"docs"</span>).<span class="f">rglob</span>(<span class="s">"*.md"</span>):
+    text = <span class="f">clean</span>(path.<span class="f">read_text</span>())          <span class="c"># strip nav, footers, boilerplate</span>
+    doc  = <span class="f">Document</span>(text=text, doc_id=<span class="f">sha256</span>(text),  <span class="c"># idempotent re-runs</span>
+        extra_info={<span class="s">"source"</span>: path.name, <span class="s">"dept"</span>: path.parent.name,
+                    <span class="s">"updated_at"</span>: <span class="f">mtime</span>(path), <span class="s">"visible_to"</span>: [<span class="s">"all-staff"</span>]})
+    nodes += splitter.<span class="f">get_nodes_from_documents</span>([doc])
+
+index = VectorStoreIndex(nodes, storage_context=<span class="f">ctx</span>(store))  <span class="c"># embeds in batches</span></code></pre>
+  <div class="callout" style="--c:var(--green)">
+    <div class="t">Why the content hash</div>
+    <p>Unchanged documents produce the same <span class="mono">doc_id</span>, so re-running ingest is a harmless overwrite. You can put this on a cron and stop thinking about it.</p>
+  </div>
+</section>
+
+<section class="slide" data-level="6" data-title="Code &middot; Query engine"
+  data-notes="This is levels 4 and 5 in one object graph. Retrieve 25, rerank to 4, apply the metadata filter for the current user. Point at similarity_top_k being 25 while the reranker returns 4, and connect it back to the funnel slide. The response_mode compact just means pack the passages efficiently into one call rather than looping.">
+  <div class="eyebrow">Step 2 of 3</div>
+  <h2>Query: retrieve generously, rerank hard</h2>
+  <div class="filetab">query.py</div>
+  <pre><code>retriever = index.<span class="f">as_retriever</span>(
+    similarity_top_k=<span class="nm">25</span>,                       <span class="c"># generous recall</span>
+    filters=<span class="f">MetadataFilters</span>(filters=[
+        <span class="f">MetadataFilter</span>(key=<span class="s">"visible_to"</span>, value=user.role, operator=<span class="s">"in"</span>)
+    ]),
+)
+engine = <span class="f">RetrieverQueryEngine</span>.<span class="f">from_args</span>(
+    retriever,
+    node_postprocessors=[<span class="f">CohereRerank</span>(top_n=<span class="nm">4</span>)],   <span class="c"># precision pass</span>
+    response_mode=<span class="s">"compact"</span>,
+)
+resp = engine.<span class="f">query</span>(<span class="s">"how many vacation days do I get?"</span>)
+<span class="f">print</span>(resp.response, [n.metadata[<span class="s">"source"</span>] <span class="k">for</span> n <span class="k">in</span> resp.source_nodes])</code></pre>
+  <p class="muted" style="font-size:var(--small-size)">Twenty-five in, four out. That is the funnel from level 5, expressed as two arguments.</p>
+</section>
+
+<section class="slide" data-level="6" data-title="Code &middot; Chat memory"
+  data-notes="The condense question mode is what makes follow-ups work, and it is the difference between a search box and a conversation. Demo it live if you can: ask about annual leave, then ask what about contractors, and show that the rewritten query contains the subject from the previous turn. If you cannot run it live, read the rewritten query out from the slide and explain what happened.">
+  <div class="eyebrow">Step 3 of 3</div>
+  <h2>Chat: make follow-ups work</h2>
+  <div class="filetab">chat.py</div>
+  <pre><code>chat = index.<span class="f">as_chat_engine</span>(
+    chat_mode=<span class="s">"condense_plus_context"</span>,   <span class="c"># rewrite, then retrieve</span>
+    memory=<span class="f">ChatMemoryBuffer</span>.<span class="f">from_defaults</span>(token_limit=<span class="nm">3000</span>),
+    system_prompt=SYSTEM,                <span class="c"># the refusal + citation prompt</span>
+)
+chat.<span class="f">chat</span>(<span class="s">"how many annual leave days do I get?"</span>)
+chat.<span class="f">chat</span>(<span class="s">"what about contractors?"</span>)
+<span class="c"># rewritten internally to:</span>
+<span class="c">#   "what is the annual leave entitlement for contractors?"</span></code></pre>
+  <div class="callout" style="--c:var(--pink)">
+    <div class="t">Gotcha</div>
+    <p>Never embed the raw follow-up. <span class="mono">"what about contractors?"</span> as a search query retrieves nothing useful, because the subject exists only in the previous turn.</p>
+  </div>
+</section>
+
+<section class="slide" data-level="6" data-title="Evaluation"
+  data-notes="This is the slide that separates people who ship RAG from people who demo it. The critical insight is that retrieval and generation fail differently and must be measured separately, because if you only look at the final answer you cannot tell whether retrieval missed the passage or the model ignored it. Tell them to write twenty real question and answer pairs by hand before writing any evaluation code. Twenty is enough to catch the embarrassing failures and small enough to actually get done.">
+  <div class="eyebrow">The part nobody demos</div>
+  <h2>Measure retrieval and generation separately</h2>
+  <div class="g2">
+    <div class="card accent" style="--c:var(--pink)">
+      <span class="ic">RETRIEVAL &middot; did we find it</span>
+      <ul class="bullets" style="margin-top:.2rem">
+        <li><strong>Hit rate</strong>: is the correct chunk anywhere in the top k</li>
+        <li><strong>MRR</strong>: how high up did it land</li>
+        <li><strong>Context precision</strong>: what fraction of retrieved text was actually relevant</li>
+      </ul>
+    </div>
+    <div class="card accent" style="--c:var(--cyan)">
+      <span class="ic">GENERATION &middot; did we use it</span>
+      <ul class="bullets" style="margin-top:.2rem">
+        <li><strong>Faithfulness</strong>: is every claim supported by the context</li>
+        <li><strong>Answer relevance</strong>: did it address the question asked</li>
+        <li><strong>Refusal accuracy</strong>: does it decline when the answer is genuinely absent</li>
+      </ul>
+    </div>
+  </div>
+  <div class="callout" style="--c:var(--amber)">
+    <div class="t">Start here, today</div>
+    <p>Hand-write <strong>20 real questions with known correct sources</strong>. Measure hit rate first. That single number tells you whether to invest in chunking, retrieval or prompting next, and it takes an afternoon.</p>
+  </div>
+</section>
+
+<section class="slide" data-level="6" data-title="Debugging a bad answer"
+  data-notes="Give them this as a procedure, not advice. The first question is always the same: was the correct chunk in the retrieved context, yes or no. Everything branches from that one check, and it takes ten seconds to answer if you log the retrieved chunks. Emphasise the logging point, because teams that do not log retrieved chunk ids are debugging blind and usually end up blaming the model.">
+  <div class="eyebrow">Triage</div>
+  <h2>One question splits every failure in two</h2>
+  <div class="callout" style="--c:var(--cyan)">
+    <div class="t">Always ask first</div>
+    <p>Was the correct chunk present in the retrieved context? Log the retrieved ids on every request, and this takes ten seconds to answer.</p>
+  </div>
+  <div class="g2">
+    <div class="card" style="border-color:color-mix(in srgb,var(--pink) 40%,transparent)">
+      <span class="ic" style="--c:var(--pink)">NO &middot; A RETRIEVAL BUG</span>
+      <ul class="bullets" style="margin-top:.2rem">
+        <li>Is the document even indexed? Check ingest logs first</li>
+        <li>Chunk too small or split mid-fact? Revisit level 3</li>
+        <li>Paraphrase gap? Add hybrid search</li>
+        <li>Filter too aggressive? Check the empty-result path</li>
+      </ul>
+    </div>
+    <div class="card" style="border-color:color-mix(in srgb,var(--amber) 40%,transparent)">
+      <span class="ic" style="--c:var(--amber)">YES &middot; A GENERATION BUG</span>
+      <ul class="bullets" style="margin-top:.2rem">
+        <li>Too many passages? Cut to 3 or 4 and retest</li>
+        <li>Answer buried mid-context? Reorder, best passage last</li>
+        <li>Contradictory chunks? Add recency preference</li>
+        <li>Prompt too permissive? Tighten the refusal instruction</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="slide" data-level="6" data-title="Production checklist"
+  data-notes="Read these as things that will happen to them rather than best practices. Deletion is the one people forget: when a document is removed from the wiki its chunks must leave the index, or your chatbot keeps confidently quoting a policy that no longer exists. Cost is the second one, and the fix is caching plus batching. Keep this brisk, they can photograph it.">
+  <div class="eyebrow">Before real users</div>
+  <h2>Eight things that will bite you</h2>
+  <div class="grid">
+    <div class="card"><span class="ic" style="--c:var(--pink)">01</span><h3>Deletion</h3><p>Removed documents must leave the index, or you quote dead policy forever.</p></div>
+    <div class="card"><span class="ic" style="--c:var(--pink)">02</span><h3>Permissions at query time</h3><p>Filter by the caller's identity, never by a hardcoded role.</p></div>
+    <div class="card"><span class="ic" style="--c:var(--amber)">03</span><h3>Cost</h3><p>Cache embeddings by content hash. Batch everything. Watch reranker spend.</p></div>
+    <div class="card"><span class="ic" style="--c:var(--amber)">04</span><h3>Latency budget</h3><p>Embed, search, rerank, generate. Know your p95 for each stage.</p></div>
+    <div class="card"><span class="ic" style="--c:var(--cyan)">05</span><h3>Observability</h3><p>Log query, rewritten query, retrieved ids, scores and the answer. All of them.</p></div>
+    <div class="card"><span class="ic" style="--c:var(--cyan)">06</span><h3>Feedback</h3><p>A thumbs down next to the citation is your cheapest evaluation dataset.</p></div>
+    <div class="card"><span class="ic" style="--c:var(--green)">07</span><h3>Empty results</h3><p>Say you do not know. Never hand the model an empty context and hope.</p></div>
+    <div class="card"><span class="ic" style="--c:var(--green)">08</span><h3>Reindex plan</h3><p>You will change models or chunk size. Make it a scripted, repeatable job.</p></div>
+  </div>
+</section>
+
+<section class="slide" data-level="6" data-title="Defaults to start with"
+  data-notes="Tell them plainly that this is a starting configuration, not a recommendation for their specific corpus, and that every value here should be replaced by a measurement within two weeks. This is the slide to leave on screen during questions.">
+  <div class="eyebrow">Cheatsheet</div>
+  <h2>Sensible defaults for version one</h2>
+  <div class="g2">
+    <table>
+      <tr><th>Decision</th><th>Start with</th></tr>
+      <tr><td>Embedding model</td><td class="mono">text-embedding-3-small</td></tr>
+      <tr><td>Chunk size</td><td class="mono">700 tokens</td></tr>
+      <tr><td>Chunk overlap</td><td class="mono">100 tokens (~15%)</td></tr>
+      <tr><td>Splitter</td><td class="mono">recursive, on headings</td></tr>
+      <tr><td>Vector store</td><td class="mono">pgvector or Chroma</td></tr>
+    </table>
+    <table>
+      <tr><th>Decision</th><th>Start with</th></tr>
+      <tr><td>Search</td><td class="mono">hybrid, alpha 0.6</td></tr>
+      <tr><td>Candidates</td><td class="mono">top_k = 25</td></tr>
+      <tr><td>After rerank</td><td class="mono">4 passages</td></tr>
+      <tr><td>Metric</td><td class="mono">cosine, normalised</td></tr>
+      <tr><td>Eval set</td><td class="mono">20 hand-written pairs</td></tr>
+    </table>
+  </div>
+  <div class="callout" style="--c:var(--amber)">
+    <div class="t">Read this as a starting point</div>
+    <p>Every number here should be replaced by a measurement from <strong>your</strong> corpus within two weeks. They are defaults to beat, not answers.</p>
+  </div>
+</section>
+
+<section class="slide" data-level="6" data-title="Wrap up &amp; questions"
+  data-notes="Close on the five sentences, they are the whole session compressed. Then open the floor. If the room is quiet, prompt them with a concrete starter: what corpus in your team would you point this at first, and what would go wrong. Offer to leave the deck link and mention that every demo in it runs offline in a browser so they can replay it.">
+  <div class="eyebrow">Level 6 complete</div>
+  <h2>Five sentences, if you forget everything else</h2>
+  <ul class="bullets" style="gap:clamp(.4rem,1.4vh,1rem)">
+    <li><strong>RAG hands the model something to read</strong> instead of asking it to remember.</li>
+    <li><strong>Embeddings turn meaning into coordinates</strong>, which is why paraphrase matching works at all.</li>
+    <li><strong>Chunking decides your ceiling.</strong> Cut on structure, overlap a little, keep the metadata.</li>
+    <li><strong>Hybrid search plus a reranker</strong> is the best quality per hour of work you can spend.</li>
+    <li><strong>If you are not measuring hit rate</strong>, you are guessing about everything else.</li>
+  </ul>
+  <div class="g3">
+    <div class="card"><span class="ic" style="--c:var(--cyan)">DOCS</span><h3>Read next</h3><p>LlamaIndex and LangChain retrieval guides. Pinecone and Weaviate learning centres.</p></div>
+    <div class="card"><span class="ic" style="--c:var(--violet)">EVAL</span><h3>Tools</h3><p>Ragas, TruLens, DeepEval, and the MTEB leaderboard for picking embedding models.</p></div>
+    <div class="card"><span class="ic" style="--c:var(--amber)">DO IT</span><h3>This week</h3><p>Index one real document set. Write 20 questions. Measure hit rate. Report back.</p></div>
+  </div>
+  <p class="lead" style="color:var(--cyan)">Questions.</p>
+</section>
+<!-- SLIDES_END -->
+</main>
+
+<div class="bar" id="bar"></div>
+<div class="hud">
+  <span class="idx"><b id="cur">1</b> / <span id="tot">1</span></span>
+  <button class="btn" id="prev" aria-label="Previous slide">&larr;</button>
+  <button class="btn" id="next" aria-label="Next slide">&rarr;</button>
+</div>
+<div class="notes" id="notes"><div class="t">Presenter notes — press N to hide</div><div id="notesBody"></div></div>
+
+<script>
+/* ====== presentation controller ====== */
+const LEVELS = {
+  "0":{name:"Orientation",mins:"5 min",c:"#7fd4ff"},
+  "1":{name:"Why RAG",mins:"15 min",c:"#38e0cf"},
+  "2":{name:"Embeddings",mins:"20 min",c:"#8b7cff"},
+  "3":{name:"Chunking",mins:"20 min",c:"#ffb547"},
+  "4":{name:"Vector DBs",mins:"20 min",c:"#5ddb8b"},
+  "5":{name:"Retrieval",mins:"20 min",c:"#ff5c8a"},
+  "6":{name:"Build it",mins:"20 min",c:"#7fd4ff"}
+};
+
+class Deck {
+  constructor(){
+    this.slides=[...document.querySelectorAll('.slide')];
+    this.i=0;
+    this.buildTOC();
+    this.bind();
+    document.getElementById('tot').textContent=this.slides.length;
+    const h=parseInt(location.hash.replace('#s',''),10);
+    this.go(Number.isFinite(h)&&h>0&&h<=this.slides.length?h-1:0,true);
+  }
+  buildTOC(){
+    const toc=document.getElementById('toc');
+    let last=null;
+    this.slides.forEach((s,i)=>{
+      const lv=s.dataset.level||"0";
+      const L=LEVELS[lv]||{name:"Section",mins:"",c:"#38e0cf"};
+      if(lv!==last){
+        last=lv;
+        const h=document.createElement('div');
+        h.className='lvl-head'; h.style.setProperty('--c',L.c);
+        h.innerHTML='<span class="dot"></span><span>'+(lv==="0"?"":"L"+lv+" · ")+L.name+'</span><span class="mins">'+L.mins+'</span>';
+        toc.appendChild(h);
+      }
+      const a=document.createElement('a');
+      a.href='#s'+(i+1); a.style.setProperty('--c',L.c);
+      if(s.dataset.demo!==undefined) a.className='demo';
+      a.innerHTML='<span class="n">'+String(i+1).padStart(2,'0')+'</span><span>'+(s.dataset.title||'Slide')+'</span>';
+      a.addEventListener('click',e=>{e.preventDefault();this.go(i);
+        if(innerWidth<=760) document.body.classList.remove('nav-open');});
+      toc.appendChild(a);
+      s._link=a;
+    });
+  }
+  go(n,silent){
+    if(n<0||n>=this.slides.length) return;
+    this.slides[this.i]?.classList.remove('active');
+    this.i=n;
+    const s=this.slides[n];
+    s.classList.add('active');
+    document.querySelectorAll('.toc a.on').forEach(a=>a.classList.remove('on'));
+    s._link.classList.add('on');
+    s._link.scrollIntoView({block:'nearest'});
+    document.getElementById('cur').textContent=n+1;
+    document.getElementById('bar').style.transform='scaleX('+((n+1)/this.slides.length)+')';
+    document.getElementById('notesBody').textContent=s.dataset.notes||'— no notes for this slide —';
+    if(!silent) history.replaceState(null,'','#s'+(n+1));
+    const inits=[...s.querySelectorAll('[data-demo-init]')];
+    if(s.dataset.demoInit) inits.unshift(s);
+    inits.forEach(el=>{
+      if(!el._booted){ el._booted=true; const fn=window[el.dataset.demoInit]; if(typeof fn==='function') fn(el); }
+    });
+  }
+  next(){this.go(Math.min(this.i+1,this.slides.length-1))}
+  prev(){this.go(Math.max(this.i-1,0))}
+  toLevel(lv){
+    const t=this.slides.findIndex(s=>s.dataset.level===String(lv));
+    if(t>=0) this.go(t);
+  }
+  bind(){
+    document.getElementById('next').onclick=()=>this.next();
+    document.getElementById('prev').onclick=()=>this.prev();
+    document.getElementById('navbtn').onclick=()=>{
+      if(innerWidth<=760) document.body.classList.toggle('nav-open');
+      else document.body.classList.toggle('nav-hidden');
+    };
+    addEventListener('keydown',e=>{
+      if(/^(INPUT|TEXTAREA)$/.test(e.target.tagName)) return;
+      switch(e.key){
+        case 'ArrowRight': case 'PageDown': case ' ': e.preventDefault(); this.next(); break;
+        case 'ArrowLeft': case 'PageUp': e.preventDefault(); this.prev(); break;
+        case 'Home': this.go(0); break;
+        case 'End': this.go(this.slides.length-1); break;
+        case 's': case 'S': document.body.classList.toggle('nav-hidden'); break;
+        case 'n': case 'N': document.body.classList.toggle('notes-open'); break;
+        case 'f': case 'F':
+          document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen();
+          break;
+        default: if(/^[0-6]$/.test(e.key)) this.toLevel(e.key);
+      }
+    });
+    let lock=0;
+    const stage=document.getElementById('stage');
+    stage.addEventListener('wheel',e=>{
+      if(e.target.closest('.no-wheel')) return;
+      const cur=this.slides[this.i];              // review mode: let the slide scroll
+      if(cur && cur.scrollHeight>cur.clientHeight+2) return;
+      const now=Date.now(); if(now-lock<520 || Math.abs(e.deltaY)<18) return;
+      lock=now; e.deltaY>0?this.next():this.prev();
+    },{passive:true});
+    let y0=null,x0=null;
+    stage.addEventListener('touchstart',e=>{y0=e.touches[0].clientY;x0=e.touches[0].clientX},{passive:true});
+    stage.addEventListener('touchend',e=>{
+      if(y0===null) return;
+      const dy=e.changedTouches[0].clientY-y0, dx=e.changedTouches[0].clientX-x0;
+      // When the slide scrolls (review mode on small screens), leave the vertical
+      // axis to the scroller and navigate on horizontal swipes only.
+      const cur=this.slides[this.i];
+      const scrollable=cur.scrollHeight>cur.clientHeight+2;
+      if(scrollable){
+        if(Math.abs(dx)>60 && Math.abs(dx)>Math.abs(dy)) dx<0?this.next():this.prev();
+      } else if(Math.max(Math.abs(dy),Math.abs(dx))>60){
+        (Math.abs(dx)>Math.abs(dy)?dx<0:dy<0)?this.next():this.prev();
+      }
+      y0=null;
+    },{passive:true});
+  }
+}
+const deck = new Deck();
+</script>
+</body>
+</html>
