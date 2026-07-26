@@ -2,11 +2,14 @@
 # Private source documents
 # ---------------------------------------------------------------------------
 # The workshop is demoed against an internal document that must never leave the
-# presenter's machine. PDFs are therefore excluded by default and allow-listed
-# individually, so dropping a new confidential file into this folder cannot
-# accidentally commit it.
+# presenter's machine. No PDF is committed anywhere in this repo: attendees
+# supply their own, and tests generate a synthetic one at runtime. The rule is
+# therefore absolute with no allow-list, so dropping a confidential file into
+# any folder here cannot commit it by accident.
 *.pdf
-!tests/fixtures/*.pdf
+
+# Presenter-local Compose overrides (bind-mounts the internal document)
+docker-compose.override.yml
 
 # ---------------------------------------------------------------------------
 # Runtime data

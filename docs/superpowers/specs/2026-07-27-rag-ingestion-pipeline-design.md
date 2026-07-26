@@ -27,7 +27,7 @@ afterwards, so readability is a requirement, not a nicety.
 | Model delivery | Baked into the Docker image at build time | Presentation is assumed offline. Nothing downloads while a room watches. |
 | Backend | FastAPI + asyncio background tasks + SSE | Two containers, no broker. Keeps the LangChain pipeline the most prominent code in the repo. |
 | Frontend | Jinja2 template + vanilla JS | No build step. Matches the deck's visual language directly. |
-| Sample document | `internal-document.pdf` (in repo) | Real, messy, and recognisable to the audience. |
+| Sample document | **None committed.** Attendees upload their own PDF | The presenter's document is internal and must not ship in the repo, the Docker image, or the README's instructions. |
 | Vector store | ChromaDB in Docker, cosine, normalised vectors | Deck defaults slide. |
 | Generation model | None in this build | Nothing in steps 1–9 needs an LLM. `deepseek-r1:1.5b` via Ollama is the documented choice for the future query build. |
 
@@ -39,6 +39,24 @@ afterwards, so readability is a requirement, not a nicety.
 - **Streamlit.** Cannot wear the deck's design, fights progressive unlock with its rerun model,
   and tangles pipeline logic with UI logic in one file.
 - **LlamaIndex to match the deck verbatim.** Contradicts the stated LangChain requirement.
+
+### Handling the private source document
+
+The presenter demos against an internal PDF that must not be published. It reaches the running app
+through exactly one channel, and every other path is closed deliberately:
+
+| Channel | Treatment |
+|---|---|
+| Git history | `*.pdf` excluded with no allow-list. The rule is absolute, so a confidential file dropped anywhere in the tree cannot be committed by accident. |
+| Docker image | **Never `COPY`'d.** Baking it into a layer would leak it on any image push or share, regardless of `.gitignore`. |
+| Running container | Read-only bind mount, declared in `docker-compose.override.yml` — which is itself gitignored. Compose merges it automatically when present and ignores its absence, so attendees are unaffected. |
+| README | Instructs attendees to supply their own PDF. Never references the internal document. |
+| Tests | Generate a synthetic PDF at runtime; no committed fixture, no dependency on the private file. |
+
+A `docker-compose.override.yml.example` is committed to document the pattern without the filename.
+The *Use local document* button in step 1 renders only when `LOCAL_PDF_PATH` resolves to an existing
+file, so it is a presenter convenience that disappears cleanly for everyone else — worth having,
+because pushing 14 MB through a browser file picker mid-talk is an avoidable risk.
 
 ### A note on semantic chunking
 
@@ -67,10 +85,11 @@ class-rag/
 ├── CLAUDE.md
 ├── README.md
 ├── docker-compose.yml          # extended, not replaced
+├── docker-compose.override.yml.example   # presenter's read-only PDF bind mount
 ├── .env.example
-├── .dockerignore
+├── .dockerignore               # excludes *.pdf so no document enters the build context
+├── .gitignore                  # *.pdf, absolute, no allow-list
 ├── rag-workshop.html           # the deck, unmodified
-├── internal-document.pdf            # bundled sample; Dockerfile COPYs it to /app/samples/
 ├── app/
 │   ├── Dockerfile
 │   ├── requirements.txt
@@ -85,9 +104,10 @@ class-rag/
 │   │   └── store.py            # Chroma writes, metadata assembly
 │   ├── static/{app.css, app.js}
 │   └── templates/index.html
+├── requirements-dev.txt        # pytest + reportlab (fixture generation)
 ├── docs/superpowers/specs/
 └── tests/
-    ├── conftest.py
+    ├── conftest.py             # builds a synthetic PDF at runtime, never committed
     ├── test_loader.py
     ├── test_chunkers.py
     └── test_store.py
@@ -125,8 +145,10 @@ built during extraction; a chunk is attributed to the page containing its **star
 bisect. This keeps chunking free to cross page boundaries — which recursive and semantic strategies
 must do — while still giving every chunk a citable page.
 
-**Measured baseline for the bundled PDF:** 270 pages, 254,397 chars, 30,948 words, 1 page with no
-text layer, 9 thin pages, ~1,834 sentences.
+**Measured baseline** (presenter's document, for sizing rather than as a committed fixture):
+270 pages, 254,397 chars, 30,948 words, 1 page with no text layer, 9 thin pages, ~1,834 sentences
+→ ~423 chunks at size 700. These numbers set the performance expectations below; nothing in the
+code or tests depends on that specific file.
 
 ### `pipeline/chunkers.py`
 
@@ -140,11 +162,26 @@ def chunk(text: str, size: int, overlap: int) -> list[Chunk]
 |---|---|---|
 | Fixed size | `CharacterTextSplitter(separator="")` | "Baseline only. Splits mid sentence and mid word." |
 | Recursive *(default)* | `RecursiveCharacterTextSplitter` with `["\n\n", "\n", ". ", " ", ""]` | "The right default. Respects natural boundaries." |
-| Structure-aware | Regex split on this corpus's real heading markers (`❖`, `●`, numbered `1.2`, lettered `a)` / `i)` — 223 instances), then recursive within each section | "Best value when documents have real structure." |
+| Structure-aware | Ordered heading-pattern detection (see below), then recursive within each section | "Best value when documents have real structure." |
 | Semantic | `SemanticChunker` (langchain-experimental) with the local MiniLM embeddings | "Slow and costs embeddings up front. Sometimes worth it." |
 | Parent document | 300-char children, 1500-char parents, parents held in a JSON docstore | "Best of both. Precise search, full context." |
 
 Defaults: **size 700, overlap 100** — the deck's "Sensible defaults for version one" slide.
+
+**Structure-aware heading detection.** Since attendees upload arbitrary PDFs, this strategy cannot
+be tuned to one document's quirks. It tries an ordered list of patterns and uses the first that
+matches often enough (≥3 occurrences) to be a real structure signal:
+
+1. Markdown-style headings (`#`, `##`) — present when the PDF came from Markdown
+2. Numbered sections (`1.`, `1.2`, `1.2.3`)
+3. Symbol bullets used as headings (`❖`, `●`, `▪`)
+4. Lettered/roman items (`a)`, `i)`, `iv.`)
+5. Short ALL-CAPS or Title-Case lines standing alone
+
+If no pattern clears the threshold, the strategy **degrades to recursive** and the UI says so
+plainly — *"No document structure detected; fell back to recursive."* An honest empty result beats
+one section containing the whole document, and it makes the deck's "when documents have real
+structure" caveat concrete when someone uploads a PDF that hasn't got any.
 
 **How the sliders map per strategy.** Not every strategy consumes `size` and `overlap` the same
 way, and the UI must not imply otherwise. The controls relabel themselves per selected card:
@@ -221,8 +258,8 @@ the teaching material.
 | `DEFAULT_CHUNK_OVERLAP` | `100` | Level 6 defaults slide |
 | `DEFAULT_STRATEGY` | `recursive` | Level 3, "the right default" |
 | `SEMANTIC_PERCENTILE` | `95` | LangChain default |
-| `MAX_UPLOAD_MB` | `30` | Bundled sample is 14.1 MB |
-| `SAMPLE_PDF_PATH` | `/app/samples/internal-document.pdf` | Bundled document |
+| `MAX_UPLOAD_MB` | `30` | Presenter's document is 14.1 MB |
+| `LOCAL_PDF_PATH` | *(unset)* | Optional presenter convenience. Set by `docker-compose.override.yml`; when unset or unresolvable the *Use local document* button is not rendered |
 | `HF_HOME` | `/opt/hf` | Baked-in model cache |
 | `OLLAMA_BASE_URL` | *(unset)* | Reserved seam for the future query build; unused in this scope |
 
@@ -250,7 +287,7 @@ Timestamps are ISO 8601 UTC. Values above are synthetic examples.
 
 | Step | Endpoint | Behaviour | Unlocks |
 |---|---|---|---|
-| 1. Upload | `POST /api/upload` (multipart) or `POST /api/use-sample` | Save, extract, clean. Returns page count, char count, and cleaning counts. | 2 |
+| 1. Upload | `POST /api/upload` (multipart), or `POST /api/use-local` when `LOCAL_PDF_PATH` resolves | Save, extract, clean. Returns page count, char count, and cleaning counts. | 2 |
 | 2. Configure | client-side | Five strategy cards with deck verdicts; size/overlap sliders prefilled 700/100. | 3 |
 | 3. Chunk | `POST /api/chunk` → `job_id`; `GET /api/events/{job_id}` (SSE) | asyncio task streams each chunk as it is cut. Preview pane appends index, char count, metadata badges. | 4 |
 | 4. Embed | `POST /api/embed` → `job_id`; same SSE channel | Batched MiniLM encode, normalise, write to Chroma. Streams `done/total`. | 5 |
@@ -283,7 +320,7 @@ Every failure renders inside the step card that caused it. No stack traces on a 
 | Encrypted / no text layer | Detected post-extraction: *"0 characters extracted — this looks like a scanned PDF; RAG needs a text layer."* A real gotcha, worth surfacing rather than swallowing |
 | Chroma unreachable | Banner with retry. `depends_on` + healthcheck should prevent it; a mid-demo container death must not look like an app crash |
 | SSE connection drops | JS falls back to polling `/api/status/{job_id}` |
-| Semantic chunking latency | Elapsed-time counter plus an inline note that this is the expensive strategy (~1,834 sentences, under 10s on CPU for the bundled PDF) |
+| Semantic chunking latency | Elapsed-time counter plus an inline note that this is the expensive strategy (~1,834 sentences, under 10s on CPU at the measured baseline) |
 | Re-running the same PDF | Content-hash ids make it an overwrite, not 423 duplicate rows |
 
 ## Testing
@@ -291,11 +328,19 @@ Every failure renders inside the step card that caused it. No stack traces on a 
 `pytest`, run as `docker compose run --rm app pytest` so attendees need no local Python.
 Tests document behaviour for readers rather than chasing a coverage percentage.
 
-- **`test_loader.py`** — TOC lines removed; U+200B stripped; page count preserved; `doc_id` stable
-  across repeated loads of identical input.
+**Fixture strategy.** No PDF is committed. `conftest.py` builds one at runtime with `reportlab`
+(a dev-only dependency) into `tmp_path`, deliberately reproducing the messiness the loader must
+handle: a table of contents with dotted leaders and trailing page numbers, U+200B zero-width spaces
+in headings, `❖` and numbered section markers, and one page with no text. That keeps the suite
+green on a fresh clone with no private data anywhere, and the fixture doubles as executable
+documentation of what "dirty input" means.
+
+- **`test_loader.py`** — TOC lines removed; U+200B stripped; page count preserved; the no-text page
+  counted in `pages_without_text`; `doc_id` stable across repeated loads of identical input.
 - **`test_chunkers.py`** — fixed-size splits mid-word (asserting the deck's criticism is literally
-  true); recursive does not; structure-aware keeps `❖` sections intact; parent-document children all
-  carry a resolvable `parent_id`; size/overlap respected within tolerance.
+  true); recursive does not; structure-aware keeps `❖` sections intact **and falls back to recursive
+  on a structureless document**; parent-document children all carry a resolvable `parent_id`;
+  size/overlap respected within tolerance.
 - **`test_store.py`** — write/read round-trip against an ephemeral Chroma client; ingesting the same
   document twice produces no duplicates; every record carries `embed_model`; stored vectors have
   norm ≈ 1.0.
@@ -307,8 +352,10 @@ the LangChain-vs-deck-LlamaIndex discrepancy recorded so it does not resurface a
 Ollama seam for the future query build; conventions (high comment density in `pipeline/`, normal
 elsewhere).
 
-**`README.md`** — attendee quickstart: clone, `docker compose up`, open `localhost:8080`, click
-*Use bundled document*. Plus a short tour of which file corresponds to which deck level.
+**`README.md`** — attendee quickstart: clone, `docker compose up`, open `localhost:8080`, drag in
+any text-layer PDF. Notes what makes a good demo document (real headings, a table of contents to
+watch get stripped) and warns that scanned PDFs won't work, with the reason. Plus a short tour of
+which file corresponds to which deck level. It never references the internal document.
 
 ## Out of scope
 
@@ -316,8 +363,7 @@ Retrieval, hybrid search, reranking, prompt assembly, generation, chat history, 
 authentication, multi-user sessions, and access-control filtering. The deck covers these in Levels
 5–6; they are the next build.
 
-## Open item
+## Resolved
 
-The repository is not currently under version control, so this spec cannot be committed. Since the
-project is destined for GitHub, `git init` plus an initial commit should happen before
-implementation — pending confirmation.
+Repository initialised on `main`; deck, Compose file, and this spec committed as `87c71ec`. The
+internal PDF is excluded and verified excluded via `git check-ignore`.
