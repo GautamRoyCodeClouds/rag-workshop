@@ -1,0 +1,2131 @@
+# RAG Ingestion Pipeline Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** A single-page web app that ingests a PDF through five selectable chunking strategies into ChromaDB, unlocking one step at a time so a presenter can narrate each stage live.
+
+**Architecture:** Two Docker containers — a FastAPI app and ChromaDB. The app serves one Jinja2 page; pipeline work runs in asyncio tasks and reports progress over Server-Sent Events. LangChain supplies the PDF loader, the five text splitters, and the embedding wrapper; the raw `chromadb` client handles writes and vector reads so batch progress and the vector preview can be shown honestly.
+
+**Tech Stack:** Python 3.12, FastAPI, Uvicorn, Jinja2, LangChain (`langchain-community`, `langchain-text-splitters`, `langchain-huggingface`, `langchain-experimental`), `sentence-transformers` (`all-MiniLM-L6-v2`, 384 dims), ChromaDB, pytest + reportlab.
+
+**Spec:** `docs/superpowers/specs/2026-07-27-rag-ingestion-pipeline-design.md`
+
+## Global Constraints
+
+- **Python 3.12** in the container. No local Python required to run or test.
+- **LangChain, not LlamaIndex.** The deck's code slides use LlamaIndex; that discrepancy is intentional and recorded in CLAUDE.md. Do not "fix" the deck.
+- **No PDF may be committed.** `.gitignore` excludes `*.pdf` absolutely, with no allow-list. Tests generate PDFs at runtime.
+- **Model baked into the image** at build time via `HF_HOME=/opt/hf`. Nothing downloads at runtime.
+- **Embedding model:** `sentence-transformers/all-MiniLM-L6-v2`, 384 dims, L2-normalised at write time.
+- **Deck defaults, verbatim:** chunk size `700`, overlap `100`, strategy `recursive`, metric `cosine`.
+- **Comment density:** high in `app/pipeline/` (attendees read these first — every strategy docstring quotes the deck's verdict); normal elsewhere.
+- **No dead code.** `OLLAMA_BASE_URL` is the one documented exception: declared in config and CLAUDE.md as a seam for the future query build, read by nothing.
+- **Chroma metadata cannot hold `None`.** Use `""` for an absent `parent_id`.
+- **Honesty about progress:** embedding progress is genuinely incremental (per batch). Chunking is atomic inside LangChain's splitters — the *rendering* of chunks streams, the splitting does not. Never insert artificial delays to fake progress.
+- **Deviation from the spec, deliberate:** the spec said writes go through `langchain-chroma`. They go through the raw `chromadb` client instead, because that library computes embeddings internally, which would prevent both per-batch progress reporting and the vector preview. LangChain still supplies the loader, all five splitters, and the embedding wrapper. Recorded in CLAUDE.md.
+
+---
+
+## File Structure
+
+| File | Responsibility |
+|---|---|
+| `app/config.py` | All tunables, read from env, each default annotated with its deck slide |
+| `app/pipeline/loader.py` | PDF → cleaned text; cleaning counts; page-offset map |
+| `app/pipeline/chunkers.py` | The five strategies behind one `chunk()` interface |
+| `app/pipeline/embedder.py` | MiniLM wrapper; batched embedding with progress callback |
+| `app/pipeline/store.py` | Chroma writes (delete-before-write) and record reads |
+| `app/session.py` | Per-session state + JSON persistence for refresh-safety |
+| `app/jobs.py` | Job registry and SSE event queues |
+| `app/main.py` | FastAPI routes, SSE endpoints, page render |
+| `app/templates/index.html` | The five stacked step sections |
+| `app/static/app.css` | Deck design tokens |
+| `app/static/app.js` | Step unlock, SSE consumption, polling fallback |
+| `tests/conftest.py` | Runtime-generated PDF fixtures (reportlab) |
+
+Task order below is dependency order. Each task ends with something independently runnable.
+
+---
+
+## Task 1: Docker foundation, config, and health check
+
+**Files:**
+- Create: `app/__init__.py`, `app/config.py`, `app/main.py`, `app/requirements.txt`, `requirements-dev.txt`, `app/Dockerfile`, `.dockerignore`, `.env.example`, `docker-compose.override.yml.example`
+- Modify: `docker-compose.yml`
+- Test: `tests/test_config.py`
+
+**Interfaces:**
+- Consumes: nothing (first task)
+- Produces: `app.config.Settings` (frozen dataclass) and `app.config.settings` (module-level instance). Fields: `chroma_host: str`, `chroma_port: int`, `chroma_collection: str`, `embed_model: str`, `embed_dims: int`, `embed_batch_size: int`, `default_chunk_size: int`, `default_chunk_overlap: int`, `default_strategy: str`, `semantic_percentile: int`, `max_upload_mb: int`, `data_dir: Path`, `local_pdf_path: str`, `ollama_base_url: str`. Classmethod `Settings.from_env(env: Mapping[str, str] | None = None) -> Settings`. Properties `local_pdf -> Path | None` and `max_upload_bytes -> int`. Also produces `app.main.app` (FastAPI instance) and route `GET /api/health`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/test_config.py`:
+
+```python
+"""Config defaults are the deck's numbers. If one of these fails, either the
+deck changed or someone drifted from it -- check the slide first.
+"""
+from pathlib import Path
+
+from app.config import Settings
+
+
+def test_defaults_match_the_deck():
+    s = Settings.from_env({})
+    # "Sensible defaults for version one" slide (Level 6)
+    assert s.default_chunk_size == 700
+    assert s.default_chunk_overlap == 100
+    assert s.default_strategy == "recursive"
+    # Level 2 model table, self-host row
+    assert s.embed_model == "sentence-transformers/all-MiniLM-L6-v2"
+    assert s.embed_dims == 384
+
+
+def test_env_overrides_are_typed():
+    s = Settings.from_env({"DEFAULT_CHUNK_SIZE": "1500", "CHROMA_PORT": "9000"})
+    assert s.default_chunk_size == 1500
+    assert s.chroma_port == 9000
+    assert isinstance(s.chroma_port, int)
+
+
+def test_blank_env_value_falls_back_to_default():
+    assert Settings.from_env({"DEFAULT_CHUNK_SIZE": ""}).default_chunk_size == 700
+
+
+def test_local_pdf_is_none_when_unset():
+    assert Settings.from_env({}).local_pdf is None
+
+
+def test_local_pdf_is_none_when_path_missing():
+    assert Settings.from_env({"LOCAL_PDF_PATH": "/nope/absent.pdf"}).local_pdf is None
+
+
+def test_local_pdf_resolves_when_file_exists(tmp_path):
+    p = tmp_path / "doc.pdf"
+    p.write_bytes(b"%PDF-1.4\n")
+    assert Settings.from_env({"LOCAL_PDF_PATH": str(p)}).local_pdf == Path(p)
+
+
+def test_max_upload_bytes_derives_from_megabytes():
+    assert Settings.from_env({"MAX_UPLOAD_MB": "2"}).max_upload_bytes == 2 * 1024 * 1024
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `python -m pytest tests/test_config.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'app.config'`
+
+- [ ] **Step 3: Write the config module**
+
+Create `app/__init__.py` as an empty file.
+
+Create `app/config.py`:
+
+```python
+"""Central configuration for the ingestion demo.
+
+Every default here is a number taken from the workshop deck, and the comment
+beside it names the slide. That traceability is deliberate: when an attendee
+asks "why 700?", the answer is one grep away.
+
+Values are read from the environment once at import. Tests build Settings
+directly via from_env() so they never depend on the ambient environment.
+"""
+
+from __future__ import annotations
+
+import os
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+
+
+@dataclass(frozen=True)
+class Settings:
+    # --- ChromaDB -----------------------------------------------------------
+    chroma_host: str = "chromadb"          # Compose service name
+    chroma_port: int = 8000
+    chroma_collection: str = "workshop"
+
+    # --- Embeddings ---------------------------------------------------------
+    # Level 2, "Which embedding model, and does it matter": the self-host row.
+    # 384 dims, runs on CPU, needs no API key -- which is why it works offline.
+    embed_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    embed_dims: int = 384
+    embed_batch_size: int = 64
+
+    # --- Chunking -----------------------------------------------------------
+    # Level 6, "Sensible defaults for version one".
+    default_chunk_size: int = 700
+    default_chunk_overlap: int = 100
+    default_strategy: str = "recursive"     # Level 3: "the right default"
+    semantic_percentile: int = 95           # LangChain SemanticChunker default
+
+    # --- Upload -------------------------------------------------------------
+    max_upload_mb: int = 30
+    data_dir: Path = Path("/data")
+
+    # Optional presenter convenience. When this resolves to a real file the UI
+    # offers a "Use local document" button, so the presenter can skip a large
+    # file picker mid-talk. Unset for everyone else, and the button vanishes.
+    local_pdf_path: str = ""
+
+    # Reserved seam for the future query build (deck Levels 5-6). Read by
+    # nothing in this scope -- see CLAUDE.md. deepseek-r1:1.5b is the intended
+    # generation model.
+    ollama_base_url: str = ""
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
+        """Build settings from a mapping, defaulting to os.environ."""
+        e = os.environ if env is None else env
+
+        def text(key: str, default: str) -> str:
+            value = e.get(key)
+            return default if value is None or value == "" else value
+
+        def number(key: str, default: int) -> int:
+            value = e.get(key)
+            return default if value is None or value == "" else int(value)
+
+        return cls(
+            chroma_host=text("CHROMA_HOST", cls.chroma_host),
+            chroma_port=number("CHROMA_PORT", cls.chroma_port),
+            chroma_collection=text("CHROMA_COLLECTION", cls.chroma_collection),
+            embed_model=text("EMBED_MODEL", cls.embed_model),
+            embed_dims=number("EMBED_DIMS", cls.embed_dims),
+            embed_batch_size=number("EMBED_BATCH_SIZE", cls.embed_batch_size),
+            default_chunk_size=number("DEFAULT_CHUNK_SIZE", cls.default_chunk_size),
+            default_chunk_overlap=number(
+                "DEFAULT_CHUNK_OVERLAP", cls.default_chunk_overlap
+            ),
+            default_strategy=text("DEFAULT_STRATEGY", cls.default_strategy),
+            semantic_percentile=number("SEMANTIC_PERCENTILE", cls.semantic_percentile),
+            max_upload_mb=number("MAX_UPLOAD_MB", cls.max_upload_mb),
+            data_dir=Path(text("DATA_DIR", str(cls.data_dir))),
+            local_pdf_path=text("LOCAL_PDF_PATH", cls.local_pdf_path),
+            ollama_base_url=text("OLLAMA_BASE_URL", cls.ollama_base_url),
+        )
+
+    @property
+    def local_pdf(self) -> Path | None:
+        """The presenter's local document, or None when absent or unset."""
+        if not self.local_pdf_path:
+            return None
+        path = Path(self.local_pdf_path)
+        return path if path.is_file() else None
+
+    @property
+    def max_upload_bytes(self) -> int:
+        return self.max_upload_mb * 1024 * 1024
+
+
+settings = Settings.from_env()
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `python -m pytest tests/test_config.py -v`
+Expected: PASS, 7 passed
+
+- [ ] **Step 5: Write the requirements files**
+
+Create `app/requirements.txt`:
+
+```
+# Bounded rather than exactly pinned: the versions that resolve at build time
+# are frozen into requirements.lock.txt in Step 9 for reproducibility.
+fastapi>=0.115,<0.116
+uvicorn[standard]>=0.34,<0.35
+jinja2>=3.1,<4
+python-multipart>=0.0.20,<0.1
+
+# LangChain: PDF loader, the five splitters, and the embedding wrapper.
+langchain-community>=0.3.14,<0.4
+langchain-text-splitters>=0.3.5,<0.4
+langchain-huggingface>=0.1.2,<0.2
+langchain-experimental>=0.3.4,<0.4
+
+# Embeddings + vector store
+sentence-transformers>=3.3,<4
+chromadb>=0.6,<0.7
+pypdf>=5.1,<6
+numpy>=1.26,<3
+```
+
+Create `requirements-dev.txt`:
+
+```
+pytest>=8.3,<9
+httpx>=0.28,<0.29        # FastAPI TestClient dependency
+reportlab>=4.2,<5        # generates test PDFs at runtime; none is committed
+```
+
+- [ ] **Step 6: Write the minimal app with a health check**
+
+Create `app/main.py`:
+
+```python
+"""FastAPI application.
+
+Later tasks add the pipeline routes. This task establishes the app object plus
+a health check, so `docker compose up` can be validated before any pipeline
+code exists.
+"""
+
+from __future__ import annotations
+
+import chromadb
+from fastapi import FastAPI
+
+from app.config import settings
+
+app = FastAPI(title="RAG Ingestion Pipeline", docs_url="/api/docs")
+
+
+@app.get("/api/health")
+def health() -> dict:
+    """Report liveness and whether Chroma is reachable.
+
+    A Chroma failure is reported as degraded rather than raised: the UI shows a
+    retry banner, which beats a stack trace on a projector.
+    """
+    chroma_ok, detail = False, ""
+    try:
+        client = chromadb.HttpClient(host=settings.chroma_host, port=settings.chroma_port)
+        client.heartbeat()
+        chroma_ok = True
+    except Exception as exc:  # noqa: BLE001 - surfaced to the UI, not swallowed
+        detail = f"{type(exc).__name__}: {exc}"
+
+    return {
+        "status": "ok" if chroma_ok else "degraded",
+        "chroma": {"reachable": chroma_ok, "detail": detail},
+        "embed_model": settings.embed_model,
+        "embed_dims": settings.embed_dims,
+    }
+```
+
+- [ ] **Step 7: Write the Dockerfile**
+
+Create `app/Dockerfile`:
+
+```dockerfile
+# syntax=docker/dockerfile:1
+FROM python:3.12-slim
+
+# HF_HOME is where model weights land. Setting it *before* the download step is
+# what makes the model part of the image rather than a runtime fetch -- the
+# workshop is presented offline, so nothing may download live.
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HF_HOME=/opt/hf \
+    TOKENIZERS_PARALLELISM=false \
+    PYTHONPATH=/srv
+
+WORKDIR /srv
+
+# build-essential is needed by some wheels; purged after install so the image
+# does not carry a compiler around.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY app/requirements.txt requirements-dev.txt ./
+RUN pip install -r requirements.txt -r requirements-dev.txt \
+ && apt-get purge -y --auto-remove build-essential
+
+# Bake the embedding model into the image. ~90MB, downloaded once at build.
+RUN python -c "\
+from sentence_transformers import SentenceTransformer; \
+SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2'); \
+print('model cached')"
+
+COPY app/ /srv/app/
+COPY tests/ /srv/tests/
+
+EXPOSE 8080
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
+```
+
+Create `.dockerignore`:
+
+```
+# No PDF may enter the build context -- the presenter's document is internal
+# and must never end up in an image layer.
+*.pdf
+
+.git/
+.gitignore
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+data/
+docs/
+.impeccable/
+docker-compose.override.yml
+rag-workshop.html
+```
+
+- [ ] **Step 8: Extend Compose and add the example override**
+
+Replace `docker-compose.yml` with:
+
+```yaml
+services:
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: chromadb
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - chroma-data:/data
+    environment:
+      # Persist collections to the mounted volume instead of memory
+      IS_PERSISTENT: "TRUE"
+      PERSIST_DIRECTORY: /data
+      ANONYMIZED_TELEMETRY: "FALSE"
+    healthcheck:
+      # The image is slim (no curl), so probe the port with bash's /dev/tcp
+      test: ["CMD", "/bin/bash", "-c", "cat < /dev/null > /dev/tcp/localhost:8000"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  app:
+    build:
+      context: .
+      dockerfile: app/Dockerfile
+    container_name: rag-app
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - app-data:/data
+    environment:
+      CHROMA_HOST: chromadb
+      CHROMA_PORT: "8000"
+      DATA_DIR: /data
+    depends_on:
+      chromadb:
+        condition: service_healthy
+
+volumes:
+  chroma-data:
+  app-data:
+```
+
+Create `docker-compose.override.yml.example`:
+
+```yaml
+# Presenter-only. Copy to docker-compose.override.yml (gitignored) and point it
+# at a local PDF. Compose merges override files automatically, and their absence
+# is not an error -- so attendees are unaffected.
+#
+# The mount is read-only, and the document is NEVER copied into the image:
+# baking it into a layer would leak it on any image push or share.
+services:
+  app:
+    volumes:
+      - ./your-document.pdf:/srv/samples/local.pdf:ro
+    environment:
+      LOCAL_PDF_PATH: /srv/samples/local.pdf
+```
+
+Create `.env.example`:
+
+```bash
+# Copy to .env to override any default. Every value here is the shipped
+# default; the comment names the deck slide it came from.
+
+CHROMA_HOST=chromadb
+CHROMA_PORT=8000
+CHROMA_COLLECTION=workshop
+
+# Level 2, model table, self-host row: 384 dims, CPU, no API key
+EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2
+EMBED_DIMS=384
+EMBED_BATCH_SIZE=64
+
+# Level 6, "Sensible defaults for version one"
+DEFAULT_CHUNK_SIZE=700
+DEFAULT_CHUNK_OVERLAP=100
+DEFAULT_STRATEGY=recursive
+SEMANTIC_PERCENTILE=95
+
+MAX_UPLOAD_MB=30
+DATA_DIR=/data
+
+# Presenter convenience; see docker-compose.override.yml.example
+# LOCAL_PDF_PATH=/srv/samples/local.pdf
+
+# Reserved for the future query build. Unused in this scope.
+# OLLAMA_BASE_URL=http://host.docker.internal:11434
+```
+
+- [ ] **Step 9: Build, verify health, prove offline, freeze the lockfile**
+
+Run:
+
+```bash
+docker compose build app
+docker compose up -d
+sleep 15
+curl -s localhost:8080/api/health
+```
+
+Expected: `{"status":"ok","chroma":{"reachable":true,"detail":""},"embed_model":"sentence-transformers/all-MiniLM-L6-v2","embed_dims":384}`
+
+Prove the model is baked in rather than fetched at runtime:
+
+```bash
+docker compose run --rm --network none app python -c \
+  "from sentence_transformers import SentenceTransformer as S; \
+   m = S('sentence-transformers/all-MiniLM-L6-v2'); \
+   print('offline load OK, dims =', m.get_sentence_embedding_dimension())"
+```
+
+Expected: `offline load OK, dims = 384`. This is the offline presentation requirement, enforced rather than assumed.
+
+Freeze resolved versions and run the tests in-container:
+
+```bash
+docker compose run --rm app pip freeze > requirements.lock.txt
+docker compose run --rm app pytest tests/test_config.py -v
+```
+
+Expected: 7 passed
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add app/__init__.py app/config.py app/main.py app/requirements.txt \
+        app/Dockerfile requirements-dev.txt requirements.lock.txt \
+        .dockerignore .env.example docker-compose.yml \
+        docker-compose.override.yml.example tests/test_config.py
+git commit -m "feat: Docker foundation, config from deck defaults, health check
+
+Two-container stack. The embedding model is baked into the image at build time
+and verified loadable with --network none, so the offline presentation
+requirement is enforced by a check rather than a hope."
+```
+
+---
+
+## Task 2: PDF loader and text cleaning
+
+**Files:**
+- Create: `app/pipeline/__init__.py`, `app/pipeline/loader.py`, `tests/conftest.py`
+- Test: `tests/test_loader.py`
+
+**Interfaces:**
+- Consumes: nothing from Task 1 at runtime (independent module).
+- Produces:
+  - `CleanResult` dataclass: `pages: list[str]`, `boilerplate_lines_removed: int`, `invisible_chars_removed: int`
+  - `clean_pages(raw_pages: list[str]) -> CleanResult` — pure, no I/O
+  - `LoadResult` dataclass: `text: str`, `page_count: int`, `char_count: int`, `pages_without_text: int`, `boilerplate_lines_removed: int`, `invisible_chars_removed: int`, `doc_id: str`, `page_offsets: list[tuple[int, int]]`, method `page_for_offset(offset: int) -> int`
+  - `load_pdf(path: str | Path) -> LoadResult`
+  - `EmptyDocumentError(ValueError)`
+- Fixtures produced for later tasks: `structured_pdf`, `flat_pdf`, `dirty_pages`.
+
+**Why cleaning is split from loading:** `clean_pages` is pure, so assertions about zero-width characters are exact. Whether U+200B survives a reportlab→pypdf round-trip is a property of those libraries, not of our code; testing it through a generated PDF would test the wrong thing.
+
+- [ ] **Step 1: Write the fixtures**
+
+Create `tests/conftest.py`:
+
+```python
+"""Test fixtures.
+
+No PDF is committed to this repository -- the presenter's document is internal.
+Every PDF the suite uses is generated here at runtime with reportlab, which also
+makes these fixtures executable documentation of what "dirty input" means.
+"""
+
+from __future__ import annotations
+
+import pytest
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+
+FOOTER = "Internal Handbook -- Confidential"
+
+TOC_ENTRIES = [
+    "Introduction .......................... 1",
+    "Getting Started ....................... 2",
+    "Companies Management .................. 3",
+    "People Management ..................... 4",
+    "Reporting ............................. 5",
+]
+
+SECTIONS = [
+    ("1. Introduction", [
+        "This handbook describes the platform and its day to day operation.",
+        "Each section covers one area of the product in practical terms.",
+    ]),
+    ("2. Companies Management", [
+        "Companies are the top level record in the system.",
+        "Every company holds an address, operating hours and custom fields.",
+    ]),
+    ("3. People Management", [
+        "People belong to one or more companies as contacts.",
+        "A person record holds an address, notes and custom fields.",
+    ]),
+]
+
+
+def _draw_lines(pdf: canvas.Canvas, lines: list[str], start_y: int = 750) -> None:
+    y = start_y
+    for line in lines:
+        pdf.drawString(72, y, line)
+        y -= 16
+
+
+@pytest.fixture(scope="session")
+def structured_pdf(tmp_path_factory) -> str:
+    """A PDF with a TOC, numbered headings, a repeated footer, and a blank page.
+
+    Deliberately messy, mirroring what real exported documents look like.
+    """
+    path = tmp_path_factory.mktemp("pdfs") / "structured.pdf"
+    pdf = canvas.Canvas(str(path), pagesize=letter)
+
+    # Page 1: title + table of contents (retrieval poison; the loader strips it)
+    _draw_lines(pdf, ["Sample Handbook", ""] + TOC_ENTRIES)
+    pdf.drawString(72, 40, FOOTER)
+    pdf.showPage()
+
+    # Pages 2-4: content, each carrying the same footer
+    for heading, body in SECTIONS:
+        _draw_lines(pdf, [heading, ""] + body)
+        pdf.drawString(72, 40, FOOTER)
+        pdf.showPage()
+
+    # Final page: intentionally blank -- no text layer at all
+    pdf.showPage()
+    pdf.save()
+    return str(path)
+
+
+@pytest.fixture(scope="session")
+def flat_pdf(tmp_path_factory) -> str:
+    """A PDF with no headings whatsoever.
+
+    Used to prove structure-aware chunking degrades to recursive rather than
+    returning one section containing the whole document.
+    """
+    path = tmp_path_factory.mktemp("pdfs") / "flat.pdf"
+    pdf = canvas.Canvas(str(path), pagesize=letter)
+    sentence = "The quick brown fox jumps over the lazy dog and keeps running."
+    _draw_lines(pdf, [sentence] * 30)
+    pdf.save()
+    return str(path)
+
+
+@pytest.fixture
+def dirty_pages() -> list[str]:
+    """Raw page text as an extractor hands it over, including U+200B.
+
+    Exactly three zero-width spaces, marked below, so the count assertion in
+    test_loader.py is exact.
+    """
+    return [
+        "Sample Handbook\n"
+        "Introduction .......................... 1\n"
+        "Getting Started ....................... 2\n"
+        "Companies Management .................. 3\n" + FOOTER,
+        "1.​ Introduction\n"                       # zero-width #1
+        "This handbook describes    the platform.\n"
+        "\n\n\n"
+        "It covers day to day operation.\n" + FOOTER,
+        "2.​ Companies​ Management\n"          # zero-width #2 and #3
+        "Companies are the top level record.\n" + FOOTER,
+        "3. People Management\nPeople belong to companies.\n" + FOOTER,
+        "",
+    ]
+```
+
+- [ ] **Step 2: Write the failing test**
+
+Create `tests/test_loader.py`:
+
+```python
+"""Loader tests.
+
+clean_pages is tested against strings so the zero-width assertions are exact.
+load_pdf is tested against a generated PDF for file-level properties.
+"""
+
+import pytest
+
+from app.pipeline.loader import EmptyDocumentError, clean_pages, load_pdf
+
+
+class TestCleanPages:
+    def test_strips_zero_width_characters(self, dirty_pages):
+        result = clean_pages(dirty_pages)
+        assert result.invisible_chars_removed == 3
+        assert "​" not in "".join(result.pages)
+
+    def test_removes_table_of_contents_lines(self, dirty_pages):
+        joined = "\n".join(clean_pages(dirty_pages).pages)
+        assert "Companies Management .................. 3" not in joined
+        # ...but the real heading of the same name survives
+        assert "Companies Management" in joined
+
+    def test_removes_the_repeated_footer(self, dirty_pages):
+        result = clean_pages(dirty_pages)
+        assert "Confidential" not in "\n".join(result.pages)
+        assert result.boilerplate_lines_removed >= 4
+
+    def test_squashes_whitespace_runs(self, dirty_pages):
+        joined = "\n".join(clean_pages(dirty_pages).pages)
+        assert "    " not in joined
+        assert "\n\n\n" not in joined
+
+    def test_keeps_body_text(self, dirty_pages):
+        assert "top level record" in "\n".join(clean_pages(dirty_pages).pages)
+
+    def test_short_documents_have_no_boilerplate(self):
+        # With two pages, "appears on most pages" is not evidence of a running
+        # header -- it may simply be a two-page document that repeats a line.
+        result = clean_pages(["Alpha line\nBody one", "Alpha line\nBody two"])
+        assert result.boilerplate_lines_removed == 0
+
+    def test_page_count_is_preserved(self, dirty_pages):
+        assert len(clean_pages(dirty_pages).pages) == len(dirty_pages)
+
+
+class TestLoadPdf:
+    def test_reports_page_count_and_blank_pages(self, structured_pdf):
+        result = load_pdf(structured_pdf)
+        assert result.page_count == 5
+        assert result.pages_without_text == 1
+
+    def test_doc_id_is_stable_across_identical_loads(self, structured_pdf):
+        assert load_pdf(structured_pdf).doc_id == load_pdf(structured_pdf).doc_id
+
+    def test_doc_id_differs_between_documents(self, structured_pdf, flat_pdf):
+        assert load_pdf(structured_pdf).doc_id != load_pdf(flat_pdf).doc_id
+
+    def test_char_count_matches_text_length(self, structured_pdf):
+        result = load_pdf(structured_pdf)
+        assert result.char_count == len(result.text)
+
+    def test_page_attribution_starts_at_one_and_advances(self, structured_pdf):
+        result = load_pdf(structured_pdf)
+        assert result.page_for_offset(0) == 1
+        assert result.page_for_offset(len(result.text) - 1) >= 1
+
+    def test_offset_before_the_first_page_clamps(self, structured_pdf):
+        assert load_pdf(structured_pdf).page_for_offset(-5) == 1
+
+    def test_rejects_a_document_with_no_text_layer(self, tmp_path):
+        # A PDF with pages but no extractable text is the scanned-document case.
+        # It must fail loudly, not silently produce an empty collection.
+        from reportlab.pdfgen import canvas
+
+        path = tmp_path / "scanned.pdf"
+        pdf = canvas.Canvas(str(path))
+        pdf.showPage()
+        pdf.save()
+
+        with pytest.raises(EmptyDocumentError, match="text layer"):
+            load_pdf(path)
+```
+
+- [ ] **Step 3: Run test to verify it fails**
+
+Run: `docker compose run --rm app pytest tests/test_loader.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'app.pipeline'`
+
+- [ ] **Step 4: Write the loader**
+
+Create `app/pipeline/__init__.py` as an empty file.
+
+Create `app/pipeline/loader.py`:
+
+```python
+"""PDF loading and text cleaning -- step 1 of the pipeline.
+
+Level 2 of the deck lists "Embedding raw junk" as one of four ways people break
+RAG: navigation menus, cookie banners and page footers embed perfectly well and
+then pollute every result set. So cleaning here is a visible feature, not a
+hidden detail -- every removal is counted and reported to the UI.
+
+Two entry points, deliberately separated:
+
+  clean_pages()  pure, no I/O -- the interesting logic, exactly testable
+  load_pdf()     extracts with LangChain's PyPDFLoader, then delegates
+"""
+
+from __future__ import annotations
+
+import bisect
+import hashlib
+import re
+from collections import Counter
+from dataclasses import dataclass
+from pathlib import Path
+
+from langchain_community.document_loaders import PyPDFLoader
+
+# Zero-width and byte-order marks. Documents exported from Google Docs are
+# littered with U+200B: invisible on screen, yet it burns tokens and can split a
+# word in the middle as far as a tokeniser is concerned.
+_INVISIBLE_RE = re.compile("[​‌‍﻿]")
+
+# A table-of-contents line: text, a run of dots or spaces, then a trailing page
+# number. "Companies Management .......... 16"
+_TOC_LINE_RE = re.compile(r"^\s*\S.*?[\s.…]{2,}\d{1,4}\s*$")
+
+# Lines this long are prose, not running headers, whatever their frequency.
+_MAX_BOILERPLATE_LEN = 120
+
+# Below this many pages, "appears on most pages" is not evidence of boilerplate.
+_MIN_PAGES_FOR_BOILERPLATE = 4
+
+# Fraction of pages a line must appear on before it counts as boilerplate.
+_BOILERPLATE_PAGE_FRACTION = 0.5
+
+# Only strip TOC lines from the front, where a TOC actually lives. A mid-document
+# line that happens to end in a number is probably data.
+_TOC_LEADING_FRACTION = 0.15
+
+
+class EmptyDocumentError(ValueError):
+    """Raised when a PDF yields no usable text.
+
+    Almost always a scanned document: the pages are images, so there is no text
+    layer to extract. Worth failing loudly -- it is a real RAG gotcha, and a
+    silently empty collection is far more confusing than an error.
+    """
+
+
+@dataclass
+class CleanResult:
+    pages: list[str]
+    boilerplate_lines_removed: int
+    invisible_chars_removed: int
+
+
+@dataclass
+class LoadResult:
+    text: str
+    page_count: int
+    char_count: int
+    pages_without_text: int
+    boilerplate_lines_removed: int
+    invisible_chars_removed: int
+    doc_id: str
+    # (start_char, page_number) pairs, ascending by start_char.
+    page_offsets: list[tuple[int, int]]
+
+    def page_for_offset(self, offset: int) -> int:
+        """Which source page does this character offset fall on?
+
+        Cleaning concatenates every page into one string, so a chunk can straddle
+        a page boundary. Chunks are attributed to the page containing their
+        *start* offset: that keeps splitters free to cross boundaries (recursive
+        and semantic must) while still giving every chunk something citable.
+        """
+        if not self.page_offsets:
+            return 1
+        starts = [start for start, _ in self.page_offsets]
+        index = max(bisect.bisect_right(starts, offset) - 1, 0)
+        return self.page_offsets[index][1]
+
+
+def _find_boilerplate(pages: list[str]) -> set[str]:
+    """Lines recurring across most pages -- running headers and footers."""
+    if len(pages) < _MIN_PAGES_FOR_BOILERPLATE:
+        return set()
+
+    counts: Counter[str] = Counter()
+    for page in pages:
+        # Count each distinct line once per page, so a line repeated many times
+        # on a single page does not masquerade as a running header.
+        counts.update({
+            line.strip()
+            for line in page.splitlines()
+            if line.strip() and len(line.strip()) <= _MAX_BOILERPLATE_LEN
+        })
+
+    threshold = len(pages) * _BOILERPLATE_PAGE_FRACTION
+    return {line for line, count in counts.items() if count >= threshold}
+
+
+def _squash_whitespace(text: str) -> str:
+    """Collapse run-on spaces and blank lines left behind by extraction."""
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return "\n".join(line.rstrip() for line in text.splitlines()).strip()
+
+
+def clean_pages(raw_pages: list[str]) -> CleanResult:
+    """Strip the parts of a document that should never reach an embedding model.
+
+    Returns cleaned pages plus counts, because the UI displays them: watching
+    "removed 412 boilerplate lines, stripped 1,847 invisible characters" appear
+    on screen is what turns the deck's gotcha into something the room has seen.
+    """
+    invisible_removed = sum(len(_INVISIBLE_RE.findall(page)) for page in raw_pages)
+    pages = [_INVISIBLE_RE.sub("", page) for page in raw_pages]
+
+    boilerplate = _find_boilerplate(pages)
+    toc_cutoff = max(1, int(len(pages) * _TOC_LEADING_FRACTION))
+
+    lines_removed = 0
+    kept_pages: list[str] = []
+    for page_index, page in enumerate(pages):
+        kept_lines: list[str] = []
+        for line in page.splitlines():
+            stripped = line.strip()
+            if stripped and stripped in boilerplate:
+                lines_removed += 1
+                continue
+            if page_index < toc_cutoff and _TOC_LINE_RE.match(line):
+                lines_removed += 1
+                continue
+            kept_lines.append(line)
+        kept_pages.append(_squash_whitespace("\n".join(kept_lines)))
+
+    return CleanResult(
+        pages=kept_pages,
+        boilerplate_lines_removed=lines_removed,
+        invisible_chars_removed=invisible_removed,
+    )
+
+
+def load_pdf(path: str | Path) -> LoadResult:
+    """Extract and clean a PDF, returning text plus everything the UI reports."""
+    documents = PyPDFLoader(str(path)).load()
+    raw_pages = [doc.page_content or "" for doc in documents]
+
+    cleaned = clean_pages(raw_pages)
+    pages_without_text = sum(1 for page in cleaned.pages if not page.strip())
+
+    # Assemble one string, recording where each page starts so chunks produced
+    # downstream can be attributed back to a page number.
+    separator = "\n\n"
+    parts: list[str] = []
+    offsets: list[tuple[int, int]] = []
+    cursor = 0
+    for page_index, page in enumerate(cleaned.pages):
+        offsets.append((cursor, page_index + 1))
+        parts.append(page)
+        cursor += len(page) + len(separator)
+
+    text = separator.join(parts).strip()
+    if not text:
+        raise EmptyDocumentError(
+            f"0 characters extracted from {Path(path).name}. This looks like a "
+            "scanned PDF -- the pages are images, so there is no text layer. RAG "
+            "needs extractable text; run OCR over the document first."
+        )
+
+    return LoadResult(
+        text=text,
+        page_count=len(raw_pages),
+        char_count=len(text),
+        pages_without_text=pages_without_text,
+        boilerplate_lines_removed=cleaned.boilerplate_lines_removed,
+        invisible_chars_removed=cleaned.invisible_chars_removed,
+        doc_id=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        page_offsets=offsets,
+    )
+```
+
+- [ ] **Step 5: Run test to verify it passes**
+
+Run: `docker compose run --rm app pytest tests/test_loader.py -v`
+Expected: PASS, 14 passed
+
+If `test_reports_page_count_and_blank_pages` disagrees on `pages_without_text`, check whether reportlab emitted a trailing page for the final `showPage()`; adjust the fixture rather than loosening the assertion.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add app/pipeline/__init__.py app/pipeline/loader.py tests/conftest.py tests/test_loader.py
+git commit -m "feat: PDF loader with visible boilerplate cleaning
+
+Cleaning lives in a pure clean_pages() so the zero-width and TOC assertions are
+exact; load_pdf() handles extraction. Every removal is counted because the UI
+reports it -- the deck's 'embedding raw junk' gotcha becomes something the room
+watches happen.
+
+Scanned PDFs raise EmptyDocumentError instead of yielding a silently empty
+collection. Fixtures generate PDFs at runtime; none is committed."
+```
+
+---
+
+## Task 3: The five chunking strategies
+
+**Files:**
+- Create: `app/pipeline/chunkers.py`
+- Test: `tests/test_chunkers.py`
+
+**Interfaces:**
+- Consumes: nothing at runtime; `embeddings` is injected so tests pass a fake and never load a model.
+- Produces:
+  - `Chunk` dataclass: `index: int`, `text: str`, `start: int`, `strategy: str`, `parent_id: str`, `parent_text: str` (`""` when not applicable — Chroma metadata rejects `None`)
+  - `ChunkResult` dataclass: `chunks: list[Chunk]`, `strategy: str`, `notes: list[str]`, `sections_detected: int`, `fell_back: bool`
+  - `STRATEGIES: dict[str, StrategyInfo]` where `StrategyInfo` has `key`, `label`, `verdict`, `uses_size`, `uses_overlap`, `extra_control` — the UI renders its five cards straight from this
+  - `chunk(text: str, *, strategy: str, size: int, overlap: int, embeddings=None, percentile: int = 95) -> ChunkResult`
+  - `UnknownStrategyError(ValueError)`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/test_chunkers.py`:
+
+```python
+"""Chunker tests.
+
+Several of these assert that a strategy is *bad* in the specific way the deck
+says it is. That is deliberate: the demo's teaching value depends on fixed-size
+really shredding words, so it is worth a test.
+"""
+
+import pytest
+
+from app.pipeline.chunkers import (
+    STRATEGIES,
+    UnknownStrategyError,
+    chunk,
+)
+
+PROSE = (
+    "Companies are the top level record in the system. "
+    "Every company holds an address, operating hours and custom fields. "
+    "People belong to one or more companies as contacts. "
+    "A person record holds an address, notes and custom fields. "
+) * 12
+
+STRUCTURED = "\n".join(
+    f"{n}. Section {n}\n" + ("Body text for this section. " * 14)
+    for n in range(1, 7)
+)
+
+
+class FakeEmbeddings:
+    """Deterministic stand-in for a real model.
+
+    Sentences are embedded by length parity, which gives SemanticChunker a real
+    distance signal to find breakpoints in without loading 90MB of weights.
+    """
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [[1.0, 0.0] if len(t) % 2 else [0.0, 1.0] for t in texts]
+
+    def embed_query(self, text: str) -> list[float]:
+        return self.embed_documents([text])[0]
+
+
+class TestRegistry:
+    def test_exposes_exactly_the_decks_five_strategies(self):
+        assert set(STRATEGIES) == {
+            "fixed", "recursive", "structure", "semantic", "parent",
+        }
+
+    def test_every_strategy_carries_the_decks_verdict(self):
+        for info in STRATEGIES.values():
+            assert info.verdict, f"{info.key} has no verdict text"
+            assert info.label
+
+    def test_semantic_declares_it_ignores_size_and_overlap(self):
+        # The UI disables those sliders based on these flags. If they were wrong
+        # the room would see controls that silently do nothing.
+        info = STRATEGIES["semantic"]
+        assert info.uses_size is False
+        assert info.uses_overlap is False
+        assert info.extra_control == "percentile"
+
+    def test_recursive_is_the_default_and_uses_both_sliders(self):
+        info = STRATEGIES["recursive"]
+        assert info.uses_size and info.uses_overlap
+
+
+class TestFixedSize:
+    def test_splits_words_in_half(self):
+        """The deck calls this 'baseline only, splits mid sentence and mid word'.
+
+        Asserting it proves the criticism on screen rather than just claiming it.
+        """
+        result = chunk(PROSE, strategy="fixed", size=120, overlap=0)
+        # A chunk boundary that lands inside a word: chunk ends with a letter and
+        # the next begins with one, with no whitespace between them.
+        boundaries = [
+            (a.text[-1], b.text[0])
+            for a, b in zip(result.chunks, result.chunks[1:])
+        ]
+        assert any(x.isalpha() and y.isalpha() for x, y in boundaries)
+
+    def test_respects_the_requested_size(self):
+        result = chunk(PROSE, strategy="fixed", size=200, overlap=0)
+        assert all(len(c.text) <= 200 for c in result.chunks)
+
+
+class TestRecursive:
+    def test_does_not_split_words(self):
+        result = chunk(PROSE, strategy="recursive", size=200, overlap=20)
+        for a, b in zip(result.chunks, result.chunks[1:]):
+            assert not (a.text[-1].isalpha() and b.text[0].isalpha())
+
+    def test_indexes_are_sequential_from_zero(self):
+        result = chunk(PROSE, strategy="recursive", size=200, overlap=20)
+        assert [c.index for c in result.chunks] == list(range(len(result.chunks)))
+
+    def test_start_offsets_are_non_decreasing(self):
+        result = chunk(PROSE, strategy="recursive", size=200, overlap=20)
+        starts = [c.start for c in result.chunks]
+        assert starts == sorted(starts)
+
+    def test_start_offsets_point_at_the_real_text(self):
+        result = chunk(PROSE, strategy="recursive", size=200, overlap=20)
+        for c in result.chunks:
+            assert PROSE[c.start:c.start + len(c.text)] == c.text
+
+
+class TestStructureAware:
+    def test_detects_numbered_sections(self):
+        result = chunk(STRUCTURED, strategy="structure", size=700, overlap=100)
+        assert result.sections_detected == 6
+        assert result.fell_back is False
+
+    def test_keeps_a_section_heading_with_its_body(self):
+        result = chunk(STRUCTURED, strategy="structure", size=700, overlap=100)
+        first = result.chunks[0].text
+        assert first.startswith("1. Section 1")
+        assert "Body text" in first
+
+    def test_falls_back_to_recursive_without_structure(self):
+        """An honest empty result beats one section holding the whole document."""
+        result = chunk(PROSE, strategy="structure", size=200, overlap=20)
+        assert result.fell_back is True
+        assert result.sections_detected == 0
+        assert any("recursive" in note.lower() for note in result.notes)
+        assert len(result.chunks) > 1
+
+
+class TestSemantic:
+    def test_produces_chunks_without_size_or_overlap(self):
+        result = chunk(
+            STRUCTURED, strategy="semantic", size=700, overlap=100,
+            embeddings=FakeEmbeddings(), percentile=50,
+        )
+        assert len(result.chunks) >= 1
+        assert all(c.text.strip() for c in result.chunks)
+
+    def test_requires_an_embeddings_object(self):
+        with pytest.raises(ValueError, match="embeddings"):
+            chunk(PROSE, strategy="semantic", size=700, overlap=100)
+
+    def test_notes_that_the_sliders_do_not_apply(self):
+        result = chunk(
+            STRUCTURED, strategy="semantic", size=700, overlap=100,
+            embeddings=FakeEmbeddings(), percentile=50,
+        )
+        assert any("embedding distance" in note.lower() for note in result.notes)
+
+
+class TestParentDocument:
+    def test_every_child_resolves_to_a_parent(self):
+        result = chunk(PROSE, strategy="parent", size=200, overlap=20)
+        assert result.chunks
+        for c in result.chunks:
+            assert c.parent_id
+            assert c.parent_text
+            assert c.text in c.parent_text
+
+    def test_parents_are_larger_than_children(self):
+        result = chunk(PROSE, strategy="parent", size=200, overlap=20)
+        assert all(len(c.parent_text) > len(c.text) for c in result.chunks)
+
+    def test_children_respect_the_child_size(self):
+        result = chunk(PROSE, strategy="parent", size=200, overlap=20)
+        assert all(len(c.text) <= 200 for c in result.chunks)
+
+    def test_more_than_one_parent_for_long_input(self):
+        result = chunk(PROSE, strategy="parent", size=200, overlap=20)
+        assert len({c.parent_id for c in result.chunks}) > 1
+
+
+class TestDispatch:
+    def test_unknown_strategy_names_the_valid_options(self):
+        with pytest.raises(UnknownStrategyError, match="recursive"):
+            chunk(PROSE, strategy="nonsense", size=700, overlap=100)
+
+    def test_parent_id_is_empty_string_not_none(self):
+        # Chroma metadata rejects None, so absent values must be "".
+        result = chunk(PROSE, strategy="recursive", size=200, overlap=20)
+        assert all(c.parent_id == "" for c in result.chunks)
+
+    def test_every_chunk_records_its_strategy(self):
+        result = chunk(PROSE, strategy="recursive", size=200, overlap=20)
+        assert all(c.strategy == "recursive" for c in result.chunks)
+
+    def test_empty_text_yields_no_chunks(self):
+        assert chunk("", strategy="recursive", size=700, overlap=100).chunks == []
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `docker compose run --rm app pytest tests/test_chunkers.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'app.pipeline.chunkers'`
+
+- [ ] **Step 3: Write the chunkers**
+
+Create `app/pipeline/chunkers.py`:
+
+```python
+"""The five chunking strategies from Level 3 of the deck.
+
+    "Five strategies, in order of effort"
+
+      Fixed size       Every N characters, blindly
+      Recursive        Try paragraph, then sentence, then word, until it fits
+      Structure aware  Split on headings, HTML tags, code blocks
+      Semantic         Embed sentences, cut where meaning shifts
+      Parent document  Index small chunks, return their larger parent
+
+This is the file most people open first, so it is written to be read: one
+function per strategy, each docstring quoting the deck's verdict, and no
+cleverness that needs unpicking.
+
+All five go through chunk(), which returns a ChunkResult carrying the chunks
+plus any notes the UI should show the room.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+
+from langchain_text_splitters import CharacterTextSplitter, RecursiveCharacterTextSplitter
+
+# --------------------------------------------------------------------------
+# Types
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class Chunk:
+    index: int
+    text: str
+    start: int              # character offset into the source text
+    strategy: str
+    # Empty strings rather than None: Chroma metadata rejects null values.
+    parent_id: str = ""
+    parent_text: str = ""
+
+
+@dataclass
+class ChunkResult:
+    chunks: list[Chunk]
+    strategy: str
+    notes: list[str] = field(default_factory=list)
+    sections_detected: int = 0
+    fell_back: bool = False
+
+
+@dataclass(frozen=True)
+class StrategyInfo:
+    """Everything the UI needs to render one strategy card.
+
+    uses_size / uses_overlap drive whether the sliders are enabled. Getting
+    these wrong would show the room controls that silently do nothing.
+    """
+
+    key: str
+    label: str
+    verdict: str            # quoted from the deck's Level 3 table
+    uses_size: bool
+    uses_overlap: bool
+    extra_control: str = ""
+
+
+class UnknownStrategyError(ValueError):
+    """Raised when an unrecognised strategy key is requested."""
+
+
+STRATEGIES: dict[str, StrategyInfo] = {
+    "fixed": StrategyInfo(
+        key="fixed",
+        label="Fixed size",
+        verdict="Baseline only. Splits mid sentence and mid word.",
+        uses_size=True,
+        uses_overlap=True,
+    ),
+    "recursive": StrategyInfo(
+        key="recursive",
+        label="Recursive",
+        verdict="The right default. Respects natural boundaries.",
+        uses_size=True,
+        uses_overlap=True,
+    ),
+    "structure": StrategyInfo(
+        key="structure",
+        label="Structure aware",
+        verdict="Best value when documents have real structure.",
+        uses_size=True,
+        uses_overlap=True,
+    ),
+    "semantic": StrategyInfo(
+        key="semantic",
+        label="Semantic",
+        verdict="Slow and costs embeddings up front. Sometimes worth it.",
+        uses_size=False,
+        uses_overlap=False,
+        extra_control="percentile",
+    ),
+    "parent": StrategyInfo(
+        key="parent",
+        label="Parent document",
+        verdict="Best of both. Precise search, full context.",
+        uses_size=True,
+        uses_overlap=True,
+    ),
+}
+
+# --------------------------------------------------------------------------
+# Heading detection for the structure-aware strategy
+# --------------------------------------------------------------------------
+
+# Tried in order; the first pattern matching at least _MIN_SECTIONS times wins.
+# Attendees upload arbitrary PDFs, so this cannot be tuned to one document.
+_HEADING_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("markdown", re.compile(r"^#{1,6}[ \t]+\S", re.M)),
+    ("numbered", re.compile(r"^[ \t]*\d+(?:\.\d+)*\.?[ \t]+\S", re.M)),
+    ("symbol", re.compile(r"^[ \t]*[❖●▪◆■][ \t]*\S", re.M)),
+    ("lettered", re.compile(r"^[ \t]*(?:[a-z]|[ivxIVX]{1,4})[).][ \t]+\S", re.M)),
+    ("caps", re.compile(r"^[A-Z][A-Z0-9 &/,'\-]{6,80}$", re.M)),
+]
+
+# Fewer matches than this is noise, not structure.
+_MIN_SECTIONS = 3
+
+# Parents are this multiple of the child size in the parent-document strategy.
+_PARENT_SIZE_MULTIPLIER = 5
+
+_RECURSIVE_SEPARATORS = ["\n\n", "\n", ". ", " ", ""]
+
+
+def _recursive_splitter(size: int, overlap: int) -> RecursiveCharacterTextSplitter:
+    return RecursiveCharacterTextSplitter(
+        chunk_size=size,
+        chunk_overlap=overlap,
+        separators=_RECURSIVE_SEPARATORS,
+    )
+
+
+def _locate(text: str, needle: str, cursor: int) -> int:
+    """Find where a chunk sits in the source text.
+
+    LangChain's splitters return strings, not offsets, and we need offsets to
+    attribute chunks to pages. Searching forward from a cursor keeps this linear
+    and picks the right occurrence when text repeats. Overlap means a chunk can
+    begin slightly behind the cursor, hence the small rewind.
+    """
+    if not needle:
+        return cursor
+    found = text.find(needle, max(0, cursor - len(needle)))
+    if found == -1:
+        found = text.find(needle)
+    return cursor if found == -1 else found
+
+
+def _assemble(pieces: list[str], text: str, strategy: str) -> list[Chunk]:
+    """Turn a list of chunk strings into Chunks with indexes and offsets."""
+    chunks: list[Chunk] = []
+    cursor = 0
+    for index, piece in enumerate(p for p in pieces if p.strip()):
+        start = _locate(text, piece, cursor)
+        chunks.append(Chunk(index=index, text=piece, start=start, strategy=strategy))
+        cursor = start + 1
+    # Re-index after filtering blanks so indexes stay contiguous.
+    for position, chunk_obj in enumerate(chunks):
+        chunk_obj.index = position
+    return chunks
+
+
+# --------------------------------------------------------------------------
+# The five strategies
+# --------------------------------------------------------------------------
+
+
+def _chunk_fixed(text: str, size: int, overlap: int) -> ChunkResult:
+    """Cut every N characters, blindly.
+
+    Deck verdict: "Baseline only. Splits mid sentence and mid word."
+
+    separator="" makes CharacterTextSplitter split on individual characters and
+    then merge up to chunk_size, which is precisely the blind cut the deck warns
+    about. It is here to be visibly worse than the others.
+    """
+    splitter = CharacterTextSplitter(separator="", chunk_size=size, chunk_overlap=overlap)
+    return ChunkResult(
+        chunks=_assemble(splitter.split_text(text), text, "fixed"),
+        strategy="fixed",
+        notes=["Cuts on character count alone, ignoring word and sentence boundaries."],
+    )
+
+
+def _chunk_recursive(text: str, size: int, overlap: int) -> ChunkResult:
+    """Try paragraph, then sentence, then word, until the chunk fits.
+
+    Deck verdict: "The right default. Respects natural boundaries."
+    """
+    pieces = _recursive_splitter(size, overlap).split_text(text)
+    return ChunkResult(
+        chunks=_assemble(pieces, text, "recursive"),
+        strategy="recursive",
+        notes=["Falls back through paragraph, line, sentence, word, character."],
+    )
+
+
+def _detect_sections(text: str) -> tuple[str, list[int]]:
+    """Find heading offsets using the first pattern that matches often enough.
+
+    Returns (pattern_name, offsets). An empty offsets list means no structure
+    was found, which is a legitimate answer for a flat document.
+    """
+    for name, pattern in _HEADING_PATTERNS:
+        offsets = [m.start() for m in pattern.finditer(text)]
+        if len(offsets) >= _MIN_SECTIONS:
+            return name, offsets
+    return "", []
+
+
+def _chunk_structure(text: str, size: int, overlap: int) -> ChunkResult:
+    """Split on the document's own headings, then recursively within sections.
+
+    Deck verdict: "Best value when documents have real structure."
+
+    When no structure is found this degrades to recursive and says so. That
+    honesty matters: one section containing the whole document would look like
+    success while quietly ruining retrieval.
+    """
+    pattern_name, offsets = _detect_sections(text)
+
+    if not offsets:
+        fallback = _chunk_recursive(text, size, overlap)
+        return ChunkResult(
+            chunks=[Chunk(**{**c.__dict__, "strategy": "structure"}) for c in fallback.chunks],
+            strategy="structure",
+            notes=["No document structure detected; fell back to recursive splitting."],
+            sections_detected=0,
+            fell_back=True,
+        )
+
+    # Slice the document at heading offsets, keeping each heading with its body.
+    bounds = offsets + [len(text)]
+    sections = [text[bounds[i]:bounds[i + 1]] for i in range(len(offsets))]
+
+    splitter = _recursive_splitter(size, overlap)
+    pieces: list[str] = []
+    for section in sections:
+        pieces.extend(splitter.split_text(section))
+
+    return ChunkResult(
+        chunks=_assemble(pieces, text, "structure"),
+        strategy="structure",
+        notes=[f"Detected {len(offsets)} sections using the {pattern_name} heading pattern."],
+        sections_detected=len(offsets),
+    )
+
+
+def _chunk_semantic(text: str, embeddings, percentile: int) -> ChunkResult:
+    """Embed sentences and cut where meaning shifts.
+
+    Deck verdict: "Slow and costs embeddings up front. Sometimes worth it."
+
+    Note for the room: this uses an *embeddings* model, not an LLM. Sentences are
+    embedded, consecutive pairs compared by cosine distance, and a cut made where
+    the distance exceeds the chosen percentile. Nothing generates text.
+
+    Because breakpoints are data-driven, chunk size and overlap do not apply.
+    """
+    if embeddings is None:
+        raise ValueError(
+            "Semantic chunking needs an embeddings object -- it works by "
+            "comparing sentence embeddings, so there is nothing to compare without one."
+        )
+
+    # Imported lazily: langchain_experimental pulls a heavy dependency tree, and
+    # only this one strategy needs it.
+    from langchain_experimental.text_splitter import SemanticChunker
+
+    splitter = SemanticChunker(
+        embeddings,
+        breakpoint_threshold_type="percentile",
+        breakpoint_threshold_amount=percentile,
+    )
+    return ChunkResult(
+        chunks=_assemble(splitter.split_text(text), text, "semantic"),
+        strategy="semantic",
+        notes=[
+            "Cut points come from embedding distance between neighbouring "
+            f"sentences at the {percentile}th percentile, not a character budget.",
+            "Uses the embedding model, not an LLM. No text is generated.",
+        ],
+    )
+
+
+def _chunk_parent(text: str, size: int, overlap: int) -> ChunkResult:
+    """Index small children, keep their larger parent for later retrieval.
+
+    Deck verdict: "Best of both. Precise search, full context."
+
+    Scope note: this is really a *retrieval* pattern. Here we build and display
+    the child-to-parent structure; the payoff (a small chunk matches, the large
+    parent is returned) arrives with the query build. The UI says so rather than
+    implying a capability that is not wired up yet.
+    """
+    parent_size = size * _PARENT_SIZE_MULTIPLIER
+    parents = _recursive_splitter(parent_size, 0).split_text(text)
+    child_splitter = _recursive_splitter(size, overlap)
+
+    chunks: list[Chunk] = []
+    cursor = 0
+    index = 0
+    for parent_number, parent in enumerate(parents):
+        parent_id = f"p{parent_number:04d}"
+        for child in child_splitter.split_text(parent):
+            if not child.strip():
+                continue
+            start = _locate(text, child, cursor)
+            chunks.append(
+                Chunk(
+                    index=index,
+                    text=child,
+                    start=start,
+                    strategy="parent",
+                    parent_id=parent_id,
+                    parent_text=parent,
+                )
+            )
+            cursor = start + 1
+            index += 1
+
+    return ChunkResult(
+        chunks=chunks,
+        strategy="parent",
+        notes=[
+            f"{len(parents)} parents of ~{parent_size} chars, each split into "
+            f"~{size}-char children. Children are what get embedded.",
+            "The retrieval payoff needs the query build; only the structure is shown here.",
+        ],
+    )
+
+
+# --------------------------------------------------------------------------
+# Dispatch
+# --------------------------------------------------------------------------
+
+
+def chunk(
+    text: str,
+    *,
+    strategy: str,
+    size: int,
+    overlap: int,
+    embeddings=None,
+    percentile: int = 95,
+) -> ChunkResult:
+    """Split text using one of the five strategies.
+
+    embeddings is injected rather than constructed here, so tests can pass a
+    lightweight fake and never load 90MB of model weights.
+    """
+    if strategy not in STRATEGIES:
+        raise UnknownStrategyError(
+            f"Unknown strategy {strategy!r}. Valid options: {', '.join(sorted(STRATEGIES))}."
+        )
+
+    if not text.strip():
+        return ChunkResult(chunks=[], strategy=strategy, notes=["Document is empty."])
+
+    if strategy == "fixed":
+        return _chunk_fixed(text, size, overlap)
+    if strategy == "recursive":
+        return _chunk_recursive(text, size, overlap)
+    if strategy == "structure":
+        return _chunk_structure(text, size, overlap)
+    if strategy == "semantic":
+        return _chunk_semantic(text, embeddings, percentile)
+    return _chunk_parent(text, size, overlap)
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `docker compose run --rm app pytest tests/test_chunkers.py -v`
+Expected: PASS, 24 passed
+
+If `test_produces_chunks_without_size_or_overlap` errors inside `SemanticChunker`, the fake's vectors are being rejected for having 2 dimensions. Widen `FakeEmbeddings` to return 8-dimensional vectors (`[1.0] + [0.0] * 7` / `[0.0] * 7 + [1.0]`) rather than changing the production code.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add app/pipeline/chunkers.py tests/test_chunkers.py
+git commit -m "feat: the five chunking strategies from deck Level 3
+
+One function per strategy, each docstring quoting the deck's verdict. Tests
+assert fixed-size really does split words in half, so the criticism the slide
+makes is demonstrable rather than merely claimed.
+
+Structure-aware tries five heading patterns in order and degrades to recursive
+with a visible note when a document has none -- an honest fallback beats one
+section holding the whole document. STRATEGIES drives the UI cards, including
+which sliders apply, so semantic cannot show controls that do nothing."
+```
+
+---
+
+## Task 4: Embedder
+
+**Files:**
+- Create: `app/pipeline/embedder.py`
+- Test: `tests/test_embedder.py`
+
+**Interfaces:**
+- Consumes: `app.config.settings` (Task 1).
+- Produces:
+  - `build_embeddings(model_name: str | None = None) -> HuggingFaceEmbeddings` — cached per process
+  - `embed_batched(embeddings, texts: list[str], batch_size: int, on_progress: Callable[[int, int], None] | None = None) -> list[list[float]]`
+  - `vector_norm(vector: list[float]) -> float`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/test_embedder.py`:
+
+```python
+"""Embedder tests.
+
+build_embeddings loads a real 90MB model, so only one test touches it and it is
+marked slow. Everything else uses a fake, because batching and progress
+reporting are our logic, not the model's.
+"""
+
+import pytest
+
+from app.pipeline.embedder import build_embeddings, embed_batched, vector_norm
+
+
+class CountingEmbeddings:
+    """Records how it was called so batching can be asserted."""
+
+    def __init__(self):
+        self.batch_sizes: list[int] = []
+
+    def embed_documents(self, texts):
+        self.batch_sizes.append(len(texts))
+        return [[1.0, 0.0, 0.0] for _ in texts]
+
+
+def test_batches_at_the_requested_size():
+    fake = CountingEmbeddings()
+    embed_batched(fake, [f"t{i}" for i in range(10)], batch_size=4)
+    assert fake.batch_sizes == [4, 4, 2]
+
+
+def test_returns_one_vector_per_text_in_order():
+    vectors = embed_batched(CountingEmbeddings(), ["a", "b", "c"], batch_size=2)
+    assert len(vectors) == 3
+
+
+def test_progress_is_reported_per_batch_and_reaches_the_total():
+    seen: list[tuple[int, int]] = []
+    embed_batched(
+        CountingEmbeddings(), [f"t{i}" for i in range(10)],
+        batch_size=4, on_progress=lambda done, total: seen.append((done, total)),
+    )
+    assert seen == [(4, 10), (8, 10), (10, 10)]
+
+
+def test_empty_input_makes_no_calls():
+    fake = CountingEmbeddings()
+    assert embed_batched(fake, [], batch_size=4) == []
+    assert fake.batch_sizes == []
+
+
+def test_vector_norm_of_a_unit_vector_is_one():
+    assert vector_norm([0.6, 0.8]) == pytest.approx(1.0)
+
+
+@pytest.mark.slow
+def test_real_model_returns_normalised_384_dim_vectors():
+    """The deck says normalise once at write time so cosine becomes a dot
+    product. This is the test that proves we actually did."""
+    embeddings = build_embeddings()
+    vectors = embed_batched(embeddings, ["annual leave policy"], batch_size=8)
+    assert len(vectors[0]) == 384
+    assert vector_norm(vectors[0]) == pytest.approx(1.0, abs=1e-3)
+```
+
+Register the marker — create `pytest.ini`:
+
+```ini
+[pytest]
+testpaths = tests
+markers =
+    slow: loads the real embedding model (deselect with -m "not slow")
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `docker compose run --rm app pytest tests/test_embedder.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'app.pipeline.embedder'`
+
+- [ ] **Step 3: Write the embedder**
+
+Create `app/pipeline/embedder.py`:
+
+```python
+"""Turning text into vectors -- step 2 of the pipeline.
+
+Level 2 of the deck: an embedding model is a function, text in and a fixed-length
+list of floats out, trained so that related text lands in nearby positions.
+
+Two deck instructions are enforced here:
+
+  - Normalise once at write time, so cosine similarity becomes a dot product
+    (gotcha #02: unnormalised vectors let long documents dominate).
+  - Pin the model name in config, never as a default argument (the indexing and
+    querying paths must use byte-identical models).
+"""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Callable
+from functools import lru_cache
+
+from langchain_huggingface import HuggingFaceEmbeddings
+
+from app.config import settings
+
+
+@lru_cache(maxsize=2)
+def build_embeddings(model_name: str | None = None) -> HuggingFaceEmbeddings:
+    """Load the embedding model, cached for the process lifetime.
+
+    Weights are baked into the image under HF_HOME, so this never reaches the
+    network -- the workshop is presented offline. First call costs a few seconds
+    of load time; subsequent calls are free thanks to the cache.
+    """
+    return HuggingFaceEmbeddings(
+        model_name=model_name or settings.embed_model,
+        model_kwargs={"device": "cpu"},
+        # normalize_embeddings is the deck's "normalise once at write time".
+        encode_kwargs={"normalize_embeddings": True},
+    )
+
+
+def embed_batched(
+    embeddings,
+    texts: list[str],
+    batch_size: int,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> list[list[float]]:
+    """Embed texts in batches, reporting progress after each one.
+
+    Progress here is genuine: each callback fires after a batch has actually been
+    encoded. That matters for the demo -- a progress bar that moves because of a
+    timer teaches the room nothing.
+    """
+    vectors: list[list[float]] = []
+    total = len(texts)
+    for start in range(0, total, batch_size):
+        batch = texts[start:start + batch_size]
+        vectors.extend(embeddings.embed_documents(batch))
+        if on_progress is not None:
+            on_progress(min(start + len(batch), total), total)
+    return vectors
+
+
+def vector_norm(vector: list[float]) -> float:
+    """Euclidean length of a vector.
+
+    Shown in the collection preview: seeing 1.000 next to every record is how the
+    room confirms normalisation happened rather than taking it on trust.
+    """
+    return math.sqrt(sum(component * component for component in vector))
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `docker compose run --rm app pytest tests/test_embedder.py -v`
+Expected: PASS, 6 passed (the slow test loads the real model; allow ~20s)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add app/pipeline/embedder.py tests/test_embedder.py pytest.ini
+git commit -m "feat: batched embedding with genuine per-batch progress
+
+Vectors are L2-normalised at write time, per the deck's instruction that cosine
+then reduces to a dot product -- and a test asserts the norm really is 1.0
+rather than trusting the flag. Progress callbacks fire after real work, never
+on a timer."
+```
+
+---
+
+## Task 5: Chroma store with delete-before-write
+
+**Files:**
+- Create: `app/pipeline/store.py`
+- Test: `tests/test_store.py`
+
+**Interfaces:**
+- Consumes: `Chunk` (Task 3), `app.config.settings` (Task 1).
+- Produces:
+  - `get_client(host=None, port=None)`, `get_collection(client, name=None)`
+  - `write_chunks(collection, *, chunks, vectors, doc_id, source, size, overlap, embed_model, page_for_offset) -> int`
+  - `read_records(collection, offset=0, limit=25, preview_dims=8) -> dict`
+  - `count_records(collection) -> int`, `drop_collection(client, name=None) -> None`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/test_store.py`:
+
+```python
+"""Store tests, run against an in-process ephemeral Chroma client.
+
+No server needed, so the suite stays fast and hermetic while still exercising
+the real Chroma API rather than a mock of it.
+"""
+
+import chromadb
+import pytest
+
+from app.pipeline.chunkers import Chunk
+from app.pipeline.store import (
+    count_records,
+    get_collection,
+    read_records,
+    write_chunks,
+)
+
+DOC_ID = "a" * 64
+OTHER_DOC_ID = "b" * 64
+
+
+@pytest.fixture
+def collection():
+    client = chromadb.EphemeralClient()
+    return get_collection(client, "test-collection")
+
+
+def make_chunks(count: int, strategy: str = "recursive") -> list[Chunk]:
+    return [
+        Chunk(index=i, text=f"chunk number {i}", start=i * 100, strategy=strategy)
+        for i in range(count)
+    ]
+
+
+def make_vectors(count: int) -> list[list[float]]:
+    return [[1.0, 0.0, 0.0] for _ in range(count)]
+
+
+def write(collection, chunks, *, doc_id=DOC_ID, size=700, overlap=100):
+    return write_chunks(
+        collection,
+        chunks=chunks,
+        vectors=make_vectors(len(chunks)),
+        doc_id=doc_id,
+        source="handbook.pdf",
+        size=size,
+        overlap=overlap,
+        embed_model="all-MiniLM-L6-v2",
+        page_for_offset=lambda offset: offset // 100 + 1,
+    )
+
+
+class TestWrite:
+    def test_writes_every_chunk(self, collection):
+        assert write(collection, make_chunks(5)) == 5
+        assert count_records(collection) == 5
+
+    def test_reingesting_the_same_document_does_not_duplicate(self, collection):
+        write(collection, make_chunks(5))
+        write(collection, make_chunks(5))
+        assert count_records(collection) == 5
+
+    def test_shrinking_the_chunk_count_leaves_no_orphans(self, collection):
+        """The bug this exists to prevent.
+
+        Ingest at size 700 -> 5 chunks. Re-ingest at 1500 -> 2 chunks. Without
+        delete-before-write, chunks 2-4 from the first run survive as orphans and
+        silently pollute every later result.
+        """
+        write(collection, make_chunks(5), size=700)
+        write(collection, make_chunks(2), size=1500)
+        assert count_records(collection) == 2
+
+    def test_a_different_strategy_coexists(self, collection):
+        # Comparing two strategies side by side is intentional, so only a re-run
+        # of the *same* strategy replaces anything.
+        write(collection, make_chunks(3, "recursive"))
+        write(collection, make_chunks(4, "fixed"))
+        assert count_records(collection) == 7
+
+    def test_a_different_document_coexists(self, collection):
+        write(collection, make_chunks(3), doc_id=DOC_ID)
+        write(collection, make_chunks(3), doc_id=OTHER_DOC_ID)
+        assert count_records(collection) == 6
+
+    def test_writing_no_chunks_is_a_no_op(self, collection):
+        assert write(collection, []) == 0
+        assert count_records(collection) == 0
+
+
+class TestMetadata:
+    def test_every_record_records_the_embedding_model(self, collection):
+        # The deck: store the model name alongside every vector so you can tell
+        # what is stale.
+        write(collection, make_chunks(3))
+        for meta in read_records(collection)["records"]:
+            assert meta["metadata"]["embed_model"] == "all-MiniLM-L6-v2"
+
+    def test_carries_the_full_metadata_set(self, collection):
+        write(collection, make_chunks(1))
+        meta = read_records(collection)["records"][0]["metadata"]
+        for key in (
+            "doc_id", "source", "page", "chunk_index", "strategy",
+            "chunk_size", "overlap", "embed_model", "char_count", "parent_id",
+        ):
+            assert key in meta, f"missing metadata key {key}"
+
+    def test_page_is_derived_from_the_offset(self, collection):
+        write(collection, make_chunks(3))
+        pages = sorted(r["metadata"]["page"] for r in read_records(collection)["records"])
+        assert pages == [1, 2, 3]
+
+    def test_absent_parent_id_is_an_empty_string(self, collection):
+        # Chroma rejects None in metadata; "" is the sentinel.
+        write(collection, make_chunks(1))
+        assert read_records(collection)["records"][0]["metadata"]["parent_id"] == ""
+
+
+class TestRead:
+    def test_returns_a_vector_preview_and_norm(self, collection):
+        write(collection, make_chunks(1))
+        record = read_records(collection, preview_dims=2)["records"][0]
+        assert len(record["vector_preview"]) == 2
+        assert record["vector_norm"] == pytest.approx(1.0)
+        assert record["dims"] == 3
+
+    def test_paginates(self, collection):
+        write(collection, make_chunks(10))
+        page = read_records(collection, offset=4, limit=3)
+        assert len(page["records"]) == 3
+        assert page["total"] == 10
+
+    def test_includes_the_document_text(self, collection):
+        write(collection, make_chunks(1))
+        assert read_records(collection)["records"][0]["text"] == "chunk number 0"
+
+    def test_empty_collection_reads_cleanly(self, collection):
+        page = read_records(collection)
+        assert page["records"] == []
+        assert page["total"] == 0
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `docker compose run --rm app pytest tests/test_store.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'app.pipeline.store'`
+
+- [ ] **Step 3: Write the store**
+
+Create `app/pipeline/store.py`:
+
+```python
+"""Writing vectors to ChromaDB -- step 3 of the pipeline.
+
+Level 4 of the deck: "One record, four fields" -- an id, a vector, the original
+text, and metadata. That is the whole data model, and it is what this module
+writes.
+
+We use the raw chromadb client rather than langchain-chroma, deliberately.
+langchain-chroma computes embeddings internally, which would rule out both
+per-batch progress reporting and showing the room the actual vectors. LangChain
+still supplies the loader, the splitters and the embedding wrapper. Recorded in
+CLAUDE.md so the choice is not mistaken for an oversight.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+
+import chromadb
+
+from app.config import settings
+from app.pipeline.chunkers import Chunk
+from app.pipeline.embedder import vector_norm
+
+
+def get_client(host: str | None = None, port: int | None = None):
+    """Connect to the Chroma server defined in config."""
+    return chromadb.HttpClient(
+        host=host or settings.chroma_host,
+        port=port or settings.chroma_port,
+    )
+
+
+def get_collection(client, name: str | None = None):
+    """Fetch or create the workshop collection.
+
+    hnsw:space=cosine matches the deck's defaults slide. Since vectors are
+    normalised at write time, cosine and dot product agree -- but stating cosine
+    explicitly documents the intent.
+    """
+    return client.get_or_create_collection(
+        name=name or settings.chroma_collection,
+        metadata={"hnsw:space": "cosine"},
+    )
+
+
+def write_chunks(
+    collection,
+    *,
+    chunks: list[Chunk],
+    vectors: list[list[float]],
+    doc_id: str,
+    source: str,
+    size: int,
+    overlap: int,
+    embed_model: str,
+    page_for_offset: Callable[[int], int],
+) -> int:
+    """Write chunks and their vectors, replacing any previous run.
+
+    Content-hash ids make a same-parameters re-run a clean overwrite. That alone
+    is not enough, though: ingesting at size 700 yields far more chunks than at
+    1500, so the tail of the earlier run would survive as orphans and quietly
+    pollute every later result. Hence the delete first, scoped to this
+    (doc_id, strategy) pair so a *different* strategy can sit alongside for
+    comparison.
+    """
+    if not chunks:
+        return 0
+    if len(chunks) != len(vectors):
+        raise ValueError(
+            f"{len(chunks)} chunks but {len(vectors)} vectors -- these must match."
+        )
+
+    strategy = chunks[0].strategy
+
+    collection.delete(where={"$and": [{"doc_id": doc_id}, {"strategy": strategy}]})
+
+    collection.add(
+        ids=[f"{doc_id[:12]}-{strategy}-{c.index}" for c in chunks],
+        embeddings=vectors,
+        documents=[c.text for c in chunks],
+        metadatas=[
+            {
+                "doc_id": doc_id,
+                "source": source,
+                "page": page_for_offset(c.start),
+                "chunk_index": c.index,
+                "strategy": c.strategy,
+                "chunk_size": size,
+                "overlap": overlap,
+                # The deck: store the model name alongside every vector so you
+                # can tell what is stale when you change models.
+                "embed_model": embed_model,
+                "char_count": len(c.text),
+                # "" not None -- Chroma metadata rejects null values.
+                "parent_id": c.parent_id,
+            }
+            for c in chunks
+        ],
+    )
+    return len(chunks)
+
+
+def count_records(collection) -> int:
+    return collection.count()
+
+
+def read_records(
+    collection,
+    offset: int = 0,
+    limit: int = 25,
+    preview_dims: int = 8,
+) -> dict:
+    """Read a page of stored records for the collection browser.
+
+    Returns a vector preview and its norm rather than 384 floats: the point is
+    for the room to see that a record really is numbers, and that the norm is
+    1.0, without a wall of digits.
+    """
+    total = collection.count()
+    if total == 0:
+        return {"records": [], "total": 0, "offset": offset, "limit": limit}
+
+    result = collection.get(
+        include=["documents", "metadatas", "embeddings"],
+        limit=limit,
+        offset=offset,
+    )
+
+    records = []
+    for position, record_id in enumerate(result["ids"]):
+        vector = list(result["embeddings"][position])
+        records.append({
+            "id": record_id,
+            "text": result["documents"][position],
+            "metadata": result["metadatas"][position],
+            "dims": len(vector),
+            "vector_preview": [round(v, 4) for v in vector[:preview_dims]],
+            "vector_norm": round(vector_norm(vector), 4),
+        })
+
+    return {"records": records, "total": total, "offset": offset, "limit": limit}
+
+
+def drop_collection(client, name: str | None = None) -> None:
+    """Delete the collection outright, for the UI's Reset control."""
+    try:
+        client.delete_collection(name or settings.chroma_collection)
+    except Exception:  # noqa: BLE001 - already absent is success for a reset
+        pass
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `docker compose run --rm app pytest tests/test_store.py -v`
+Expected: PASS, 14 passed
+
+If `read_records` raises on `result["embeddings"]` being `None`, this Chroma version needs `include=["documents", "metadatas", "embeddings"]` passed as an `IncludeEnum` — check `collection.get.__doc__` in the installed version and adapt the include list, keeping the returned shape identical.
+
+- [ ] **Step 5: Run the whole suite and commit**
+
+```bash
+docker compose run --rm app pytest -v -m "not slow"
+docker compose run --rm app pytest -v -m slow
+git add app/pipeline/store.py tests/test_store.py
+git commit -m "feat: Chroma writes with delete-before-write idempotency
+
+Content-hash ids make a same-parameters re-run an overwrite, but changing chunk
+size shrinks the chunk count and would leave the earlier run's tail behind as
+orphans. Records are deleted per (doc_id, strategy) before writing, with a test
+pinning exactly that scenario.
+
+Records are keyed by strategy too, so two strategies can be compared side by
+side in the browser while a re-run of one replaces only itself."
+```
+
+---
+
+*Tasks 6–9 (session state, API + SSE, frontend, docs) continue below.*
