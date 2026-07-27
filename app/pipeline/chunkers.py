@@ -19,7 +19,7 @@ plus any notes the UI should show the room.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from langchain_text_splitters import CharacterTextSplitter, RecursiveCharacterTextSplitter
 
@@ -138,6 +138,45 @@ def _recursive_splitter(size: int, overlap: int) -> RecursiveCharacterTextSplitt
     )
 
 
+class OffsetNotFoundError(RuntimeError):
+    """Raised when a chunk cannot be matched back to a real source offset.
+
+    A later task uses `Chunk.start` to attribute a chunk to a source page for
+    citation. Guessing an offset here -- returning the cursor unchanged, or
+    the first occurrence anywhere in the document -- produces a number that
+    looks exactly as valid as a correct one and silently points the citation
+    at the wrong page. There is no safe fallback value, so a genuine failure
+    to locate a chunk must be loud, not quiet.
+    """
+
+
+_WHITESPACE_RUN = re.compile(r"\s+")
+
+
+def _whitespace_tolerant_pattern(needle: str) -> re.Pattern[str]:
+    """Compile `needle` into a regex that matches its own whitespace loosely.
+
+    Used only when the *full* chunk text is not found verbatim (see _locate
+    below). SemanticChunker rejoins sentences with a single space, and that
+    join can disagree with the source's original whitespace exactly at the
+    seam between two sentences -- e.g. a source " \\n" (space then newline,
+    the tail of one line and the start of the next) collapses to a single
+    " " in the chunk. Every character *other* than whitespace is unaffected,
+    so pinning those down exactly while letting each whitespace run match
+    any whitespace run recovers the same disambiguating power as an exact
+    match: a short fixed-length prefix (e.g. "the first 40 characters") was
+    tried first and rejected, because in a document built from a repeated
+    sentence -- exactly the STRUCTURED fixture below -- a short prefix
+    matches many earlier, wrong occurrences of that same sentence and the
+    forward-only search has no way to tell them apart. Requiring the *whole*
+    chunk to match, whitespace aside, keeps the search anchored on content
+    (like "2. Section 2", which appears exactly once) that a short prefix
+    would have cut away.
+    """
+    tokens = [re.escape(part) for part in _WHITESPACE_RUN.split(needle)]
+    return re.compile(r"\s+".join(tokens))
+
+
 def _locate(text: str, needle: str, cursor: int) -> int:
     """Find where a chunk sits in the source text.
 
@@ -147,19 +186,47 @@ def _locate(text: str, needle: str, cursor: int) -> int:
     sentence can occur a dozen times, at offsets that are indistinguishable
     from the substring alone. The splitter still visits the document in order
     though, so searching forward from where the previous chunk was actually
-    found -- never rewinding past it -- always lands on the correct, next
-    occurrence. Rewinding by len(needle) was tried and rejected: with cursor
-    tracked loosely it collapses to a search from character 0 and silently
-    picks the *first* occurrence instead of the right one, corrupting every
-    offset after the first repeat. Cursor must be the previous chunk's real
-    start, not merely "somewhere past it", for this to hold.
+    found always lands on the correct, next occurrence -- provided the cursor
+    passed in is strictly *past* that previous occurrence, not merely equal to
+    it. `str.find` treats its start argument as inclusive, so handing back the
+    previous chunk's raw start and reusing it as the next search's cursor lets
+    the next call re-find that exact same occurrence forever whenever two
+    consecutive chunks happen to share content at that offset (routine in
+    repetitive text, where a window of the same length can recur every few
+    characters). That was the actual bug: the cursor was tracked as "the
+    previous start" rather than "one past the previous start", so it looked
+    monotonic while silently freezing. See _assemble and _chunk_parent, which
+    advance the cursor by at least 1 after recording each match, for the other
+    half of the fix. Rewinding the cursor backwards (e.g. by len(needle)) was
+    considered and rejected for the same reason in the other direction: any
+    rewind that lands at or before the previous match reopens the same
+    re-matching hole.
+
+    SemanticChunker adds a second wrinkle: it can rejoin sentences with
+    normalised whitespace, so the chunk text is sometimes not a literal
+    substring of the source at all, even searching forward correctly. Silently
+    falling back to "wherever this text appears, if anywhere" (the old
+    behaviour) produced a plausible-looking but wrong offset -- the worst
+    outcome for a citation source, because nothing about the number looks
+    wrong. Instead, retry with a whitespace-tolerant version of the same
+    needle (see _whitespace_tolerant_pattern), and if even that cannot be
+    found forward of the cursor, raise rather than guess.
     """
     if not needle:
         return cursor
+
     found = text.find(needle, cursor)
-    if found == -1:
-        found = text.find(needle)
-    return cursor if found == -1 else found
+    if found != -1:
+        return found
+
+    match = _whitespace_tolerant_pattern(needle).search(text, cursor)
+    if match:
+        return match.start()
+
+    raise OffsetNotFoundError(
+        f"Could not locate chunk text at or after character {cursor}: "
+        f"{needle[:60]!r}{'...' if len(needle) > 60 else ''}"
+    )
 
 
 def _assemble(pieces: list[str], text: str, strategy: str) -> list[Chunk]:
@@ -169,7 +236,9 @@ def _assemble(pieces: list[str], text: str, strategy: str) -> list[Chunk]:
     for index, piece in enumerate(p for p in pieces if p.strip()):
         start = _locate(text, piece, cursor)
         chunks.append(Chunk(index=index, text=piece, start=start, strategy=strategy))
-        cursor = start
+        # Advance past this occurrence, not just to it -- see _locate's
+        # docstring for why "cursor = start" freezes on repeated content.
+        cursor = start + 1
     # Re-index after filtering blanks so indexes stay contiguous.
     for position, chunk_obj in enumerate(chunks):
         chunk_obj.index = position
@@ -238,7 +307,7 @@ def _chunk_structure(text: str, size: int, overlap: int) -> ChunkResult:
     if not offsets:
         fallback = _chunk_recursive(text, size, overlap)
         return ChunkResult(
-            chunks=[Chunk(**{**c.__dict__, "strategy": "structure"}) for c in fallback.chunks],
+            chunks=[replace(c, strategy="structure") for c in fallback.chunks],
             strategy="structure",
             notes=["No document structure detected; fell back to recursive splitting."],
             sections_detected=0,
@@ -249,6 +318,17 @@ def _chunk_structure(text: str, size: int, overlap: int) -> ChunkResult:
     bounds = offsets + [len(text)]
     sections = [text[bounds[i]:bounds[i + 1]] for i in range(len(offsets))]
 
+    # Anything before the first heading -- a title page, an abstract -- is
+    # real document content too. Slicing from offsets[0] onward used to drop
+    # it with no note and no fallback: fell_back stayed False, so the result
+    # looked complete while quietly missing everything a reader would see
+    # first. Keep it as its own leading section instead.
+    preamble = text[: offsets[0]]
+    notes = [f"Detected {len(offsets)} sections using the {pattern_name} heading pattern."]
+    if preamble.strip():
+        sections.insert(0, preamble)
+        notes.append("Text before the first heading is kept as its own leading section.")
+
     splitter = _recursive_splitter(size, overlap)
     pieces: list[str] = []
     for section in sections:
@@ -257,7 +337,7 @@ def _chunk_structure(text: str, size: int, overlap: int) -> ChunkResult:
     return ChunkResult(
         chunks=_assemble(pieces, text, "structure"),
         strategy="structure",
-        notes=[f"Detected {len(offsets)} sections using the {pattern_name} heading pattern."],
+        notes=notes,
         sections_detected=len(offsets),
     )
 
@@ -332,7 +412,8 @@ def _chunk_parent(text: str, size: int, overlap: int) -> ChunkResult:
                     parent_text=parent,
                 )
             )
-            cursor = start
+            # Advance past this occurrence -- see _locate's docstring.
+            cursor = start + 1
             index += 1
 
     return ChunkResult(

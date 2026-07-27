@@ -5,6 +5,8 @@ says it is. That is deliberate: the demo's teaching value depends on fixed-size
 really shredding words, so it is worth a test.
 """
 
+import re
+
 import pytest
 
 from app.pipeline.chunkers import (
@@ -24,6 +26,57 @@ STRUCTURED = "\n".join(
     f"{n}. Section {n}\n" + ("Body text for this section. " * 14)
     for n in range(1, 7)
 )
+
+# Deliberately degenerate: short period, heavy self-similarity. A splitter
+# whose offset tracking merely rewinds-and-searches (rather than genuinely
+# advancing past what it already found) collapses this into a handful of
+# distinct starts instead of one per chunk -- see the CRITICAL 1 finding.
+REPEAT = "ab. " * 80
+
+
+def _assert_literal_offsets(source: str, chunks) -> None:
+    """Every chunk's start must point at its own literal text in the source."""
+    for c in chunks:
+        assert source[c.start : c.start + len(c.text)] == c.text, (
+            f"chunk {c.index} claims start={c.start} but that slice does not "
+            f"match its text {c.text[:40]!r}"
+        )
+
+
+def _assert_strictly_increasing(chunks) -> None:
+    starts = [c.start for c in chunks]
+    assert starts == sorted(starts), f"starts went backwards: {starts}"
+    assert len(set(starts)) == len(starts), (
+        f"starts are not strictly increasing -- a repeated offset means the "
+        f"search froze on one occurrence instead of advancing: {starts}"
+    )
+
+
+def _assert_offsets_correct_allowing_whitespace(source: str, chunks) -> None:
+    """Confirm each chunk's start is genuinely correct, not merely plausible.
+
+    SemanticChunker can legitimately rejoin sentences with a single space
+    where the source had a run of several whitespace characters, so a plain
+    `source[start:start+len(text)] == text` slice is the wrong check here: it
+    would fail even at the *correct* start, because the source's true span is
+    longer than len(text) whenever a run got collapsed. Instead, build a
+    regex from the chunk text that pins down every non-whitespace character
+    exactly and lets whitespace runs match loosely, then require it to match
+    anchored at exactly c.start. A chunk whose offset is wrong -- guessed,
+    frozen, or pointing at some other occurrence entirely -- will not satisfy
+    this either, so it is exactly as strict as the exact-match check for
+    every strategy that doesn't touch whitespace, while still accepting the
+    one legitimate difference semantic chunking introduces.
+    """
+    ws = re.compile(r"\s+")
+    for c in chunks:
+        tokens = [re.escape(part) for part in ws.split(c.text)]
+        pattern = re.compile(r"\s+".join(tokens))
+        match = pattern.match(source, c.start)
+        assert match is not None, (
+            f"chunk {c.index} claims start={c.start} but its text (whitespace "
+            f"aside) does not appear there: {c.text[:40]!r}"
+        )
 
 
 class FakeEmbeddings:
@@ -83,6 +136,19 @@ class TestFixedSize:
         result = chunk(PROSE, strategy="fixed", size=200, overlap=0)
         assert all(len(c.text) <= 200 for c in result.chunks)
 
+    def test_start_offsets_point_at_the_real_text(self):
+        result = chunk(PROSE, strategy="fixed", size=60, overlap=40)
+        _assert_literal_offsets(PROSE, result.chunks)
+
+    def test_start_offsets_are_strictly_increasing(self):
+        result = chunk(PROSE, strategy="fixed", size=60, overlap=40)
+        _assert_strictly_increasing(result.chunks)
+
+    def test_repetitive_text_gets_one_distinct_start_per_chunk(self):
+        result = chunk(REPEAT, strategy="fixed", size=8, overlap=6)
+        starts = [c.start for c in result.chunks]
+        assert len(set(starts)) == len(result.chunks)
+
 
 class TestRecursive:
     def test_does_not_split_words(self):
@@ -94,15 +160,35 @@ class TestRecursive:
         result = chunk(PROSE, strategy="recursive", size=200, overlap=20)
         assert [c.index for c in result.chunks] == list(range(len(result.chunks)))
 
-    def test_start_offsets_are_non_decreasing(self):
+    def test_start_offsets_are_strictly_increasing(self):
+        # Non-decreasing alone passes vacuously on a frozen offset (every
+        # repeat equals the one before it, which technically is "sorted").
+        # Strictly increasing is what actually catches the freeze.
         result = chunk(PROSE, strategy="recursive", size=200, overlap=20)
-        starts = [c.start for c in result.chunks]
-        assert starts == sorted(starts)
+        _assert_strictly_increasing(result.chunks)
 
     def test_start_offsets_point_at_the_real_text(self):
         result = chunk(PROSE, strategy="recursive", size=200, overlap=20)
-        for c in result.chunks:
-            assert PROSE[c.start:c.start + len(c.text)] == c.text
+        _assert_literal_offsets(PROSE, result.chunks)
+
+    def test_repetitive_text_gets_one_distinct_start_per_chunk(self):
+        # "ab. " * 80 at size=8, overlap=6: the reproduction from the
+        # CRITICAL 1 finding. With the frozen-cursor bug this collapsed 80
+        # chunks down to 2 distinct starts.
+        result = chunk(REPEAT, strategy="recursive", size=8, overlap=6)
+        starts = [c.start for c in result.chunks]
+        assert len(set(starts)) == len(result.chunks)
+
+    def test_prose_repetitive_offsets_are_correct_and_distinct(self):
+        # PROSE at size=60, overlap=40: the other CRITICAL 1 reproduction.
+        # Chunk 60 used to report start=2675 when its true position was
+        # 2734 -- the substring check alone can pass vacuously when a
+        # chunk's text is very short, so distinct-starts is the assertion
+        # that actually catches it.
+        result = chunk(PROSE, strategy="recursive", size=60, overlap=40)
+        starts = [c.start for c in result.chunks]
+        assert len(set(starts)) == len(result.chunks)
+        _assert_literal_offsets(PROSE, result.chunks)
 
 
 class TestStructureAware:
@@ -125,6 +211,25 @@ class TestStructureAware:
         assert any("recursive" in note.lower() for note in result.notes)
         assert len(result.chunks) > 1
 
+    def test_start_offsets_point_at_the_real_text(self):
+        result = chunk(STRUCTURED, strategy="structure", size=700, overlap=100)
+        _assert_literal_offsets(STRUCTURED, result.chunks)
+
+    def test_start_offsets_are_strictly_increasing(self):
+        result = chunk(STRUCTURED, strategy="structure", size=700, overlap=100)
+        _assert_strictly_increasing(result.chunks)
+
+    def test_preserves_preamble_before_first_heading(self):
+        # IMPORTANT 3: a title page / abstract preceding heading 1 used to
+        # vanish silently -- _chunk_structure sliced from the first heading
+        # onward and never looked back.
+        preamble = "Title page. Front matter appears before section 1 starts."
+        text = preamble + "\n" + STRUCTURED
+        result = chunk(text, strategy="structure", size=700, overlap=100)
+        assert any(preamble in c.text for c in result.chunks)
+        assert result.sections_detected == 6
+        assert result.fell_back is False
+
 
 class TestSemantic:
     def test_produces_chunks_without_size_or_overlap(self):
@@ -145,6 +250,22 @@ class TestSemantic:
             embeddings=FakeEmbeddings(), percentile=50,
         )
         assert any("embedding distance" in note.lower() for note in result.notes)
+
+    def test_start_offsets_are_correct_never_silently_wrong(self):
+        # CRITICAL 2 reproduction: SemanticChunker rejoins sentences with
+        # normalised whitespace, so 5 of these 13 chunks are not a literal
+        # substring of STRUCTURED at all. The old code's unqualified
+        # text.find() fallback still returned a plausible-looking offset
+        # (start=13, wrong content) for every one of them. Every offset
+        # produced now must genuinely resolve to that chunk's real text --
+        # there is no "flagged but wrong" middle ground to accept here.
+        result = chunk(
+            STRUCTURED, strategy="semantic", size=700, overlap=100,
+            embeddings=FakeEmbeddings(), percentile=50,
+        )
+        assert len(result.chunks) >= 1
+        _assert_offsets_correct_allowing_whitespace(STRUCTURED, result.chunks)
+        _assert_strictly_increasing(result.chunks)
 
 
 class TestParentDocument:
@@ -167,6 +288,19 @@ class TestParentDocument:
     def test_more_than_one_parent_for_long_input(self):
         result = chunk(PROSE, strategy="parent", size=200, overlap=20)
         assert len({c.parent_id for c in result.chunks}) > 1
+
+    def test_start_offsets_point_at_the_real_text(self):
+        result = chunk(PROSE, strategy="parent", size=60, overlap=40)
+        _assert_literal_offsets(PROSE, result.chunks)
+
+    def test_start_offsets_are_strictly_increasing(self):
+        result = chunk(PROSE, strategy="parent", size=60, overlap=40)
+        _assert_strictly_increasing(result.chunks)
+
+    def test_repetitive_text_gets_one_distinct_start_per_chunk(self):
+        result = chunk(REPEAT, strategy="parent", size=8, overlap=6)
+        starts = [c.start for c in result.chunks]
+        assert len(set(starts)) == len(result.chunks)
 
 
 class TestDispatch:
