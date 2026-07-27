@@ -217,7 +217,10 @@ async def upload(request: Request, file: UploadFile = File(...)) -> Response:
             status_code=400,
             detail=f"File is too large: {len(payload) / 1_048_576:.1f} MB exceeds the {settings.max_upload_mb} MB limit.",
         )
-    uploads = Path(settings.data_dir) / "uploads" / state.session_id
+    # The store owns this path so that upload and reset cannot disagree about
+    # where the document lives -- a mismatch would leave the file behind on
+    # reset with nothing to reveal it.
+    uploads = store.uploads_dir(state.session_id)
     target = uploads / "source.pdf"
     staged = await asyncio.to_thread(_write_staged_upload, uploads, payload)
     try:

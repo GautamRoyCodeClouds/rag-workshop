@@ -11,6 +11,7 @@ single authority on what is reachable.
 from __future__ import annotations
 
 import json
+import shutil
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -120,7 +121,8 @@ class SessionStore:
     """In-memory sessions with a JSON mirror on disk."""
 
     def __init__(self, data_dir: Path | None = None):
-        self.data_dir = Path(data_dir or settings.data_dir) / "sessions"
+        self.root = Path(data_dir or settings.data_dir)
+        self.data_dir = self.root / "sessions"
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self._live: dict[str, SessionState] = {}
 
@@ -141,6 +143,20 @@ class SessionStore:
         if not session_id.isalnum():
             raise ValueError(f"Malformed session id: {session_id!r}")
         return self.data_dir / f"{session_id}.json"
+
+    def uploads_dir(self, session_id: str) -> Path:
+        """Where this session's uploaded document is kept.
+
+        Derived from the session id and nothing else -- deliberately not from
+        state.pdf_path. With the presenter's "Use local document" shortcut,
+        pdf_path points at a read-only bind mount of a file *outside* this
+        volume: the presenter's own document on their own filesystem. Anything
+        that deletes based on pdf_path would reach out of the volume and at
+        that file. Going through _path first applies the same id guard used for
+        session files, so a crafted id cannot escape the uploads directory.
+        """
+        self._path(session_id)
+        return self.root / "uploads" / session_id
 
     def get_or_create(self, session_id: str | None) -> SessionState:
         """Return the live session, rehydrate it from disk, or start a new one."""
@@ -198,9 +214,19 @@ class SessionStore:
         reassigned in `self._live` -- a second worker or a reloaded process
         must see the reset too, or it silently rehydrates the pre-reset file
         from the app-data volume on the next request.
+
+        The uploaded document goes with it. Clearing the state alone would
+        leave the PDF itself under uploads/<session_id>/, and app-data is a
+        named volume that survives image rebuilds -- so the file would outlive
+        every later reset and restart until someone cleared the volume by hand.
+        When the source document is confidential, "Reset everything" quietly
+        keeping a copy is the wrong failure mode.
         """
         fresh = SessionState(session_id=session_id, created_at=_now_iso())
+        # save() first: it validates the id via _path, so a malformed one
+        # raises before anything is removed from disk.
         self.save(fresh)
+        shutil.rmtree(self.uploads_dir(session_id), ignore_errors=True)
         return fresh
 
 

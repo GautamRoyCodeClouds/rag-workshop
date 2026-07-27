@@ -217,6 +217,83 @@ class TestPersistence:
         with pytest.raises(ValueError):
             store.get_or_create("a/b")
 
+class TestUploadedFileCleanup:
+    """Clearing a session must also remove the document it ingested.
+
+    The stored vectors are only one copy of an uploaded document. The file
+    itself sits under data_dir/uploads/<session_id>/, and app-data is a named
+    volume that outlives image rebuilds -- so a document left there survives
+    every later rebuild, reset and restart until someone removes the volume by
+    hand. For a demo whose source document may be confidential, "Reset
+    everything" silently keeping the file is the wrong failure mode.
+    """
+
+    def test_reset_deletes_the_sessions_uploaded_document(self, tmp_path):
+        store = make_store(tmp_path)
+        state = store.get_or_create(None)
+        uploaded = store.uploads_dir(state.session_id) / "source.pdf"
+        uploaded.parent.mkdir(parents=True, exist_ok=True)
+        uploaded.write_bytes(b"%PDF-1.4 confidential")
+        state.pdf_path = str(uploaded)
+        state.upload = {"filename": "confidential.pdf"}
+        store.save(state)
+
+        store.reset(state.session_id)
+
+        assert not uploaded.exists()
+        assert not uploaded.parent.exists()
+
+    def test_uploads_dir_comes_from_the_session_id_never_from_pdf_path(self, tmp_path):
+        """The safety property behind the deletion above.
+
+        With the presenter's "Use local document" shortcut, state.pdf_path
+        points at a read-only bind mount of a file OUTSIDE this volume -- the
+        presenter's own document on their own filesystem. A reset that derived
+        what to delete from pdf_path would reach out of the volume and try to
+        delete that. Deriving it from the session id cannot: the path is always
+        under data_dir/uploads/, whatever pdf_path happens to say.
+        """
+        store = make_store(tmp_path)
+        state = store.get_or_create(None)
+        outside = tmp_path.parent / "presenters-own-document.pdf"
+        outside.write_bytes(b"%PDF-1.4 not ours to delete")
+        state.pdf_path = str(outside)
+        store.save(state)
+
+        assert store.uploads_dir(state.session_id) == tmp_path / "uploads" / state.session_id
+
+        store.reset(state.session_id)
+
+        assert outside.exists(), "reset deleted a file outside the data volume"
+
+    def test_reset_rejects_a_malformed_id_before_deleting_anything(self, tmp_path):
+        """Ordering matters: the guard must run before any filesystem removal,
+        or a crafted id like '../../uploads' would pick the directory to delete
+        before anything validated it.
+        """
+        store = make_store(tmp_path)
+        victim = tmp_path / "uploads" / "keepme"
+        victim.mkdir(parents=True)
+        (victim / "source.pdf").write_bytes(b"%PDF-1.4")
+
+        with pytest.raises(ValueError):
+            store.reset("../uploads/keepme")
+
+        assert (victim / "source.pdf").exists()
+
+    def test_reset_is_fine_when_no_document_was_ever_uploaded(self, tmp_path):
+        # Reset is also the UI's "start over" from step 1, where no upload
+        # directory exists yet. Removing a missing directory is success.
+        store = make_store(tmp_path)
+        state = store.get_or_create(None)
+        store.save(state)
+
+        fresh = store.reset(state.session_id)
+
+        assert fresh.unlocked_step() == 1
+
+
+class TestClientView:
     def test_to_json_excludes_chunk_bodies(self, tmp_path):
         """The client gets counts and metadata, not 423 chunk bodies twice."""
         state = make_store(tmp_path).get_or_create(None)
