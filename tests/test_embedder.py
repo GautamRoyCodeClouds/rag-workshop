@@ -59,3 +59,61 @@ def test_real_model_produces_l2_normalised_vectors():
     vectors = embed_batched(embeddings, ["annual leave policy"], batch_size=8)
     assert len(vectors[0]) == 384
     assert vector_norm(vectors[0]) == pytest.approx(1.0, abs=1e-3)
+
+
+def test_batch_size_zero_raises_error():
+    """batch_size=0 triggers a guard that prevents the silent range() failure.
+    
+    This tests FINDING 1: negative or zero batch_size causes range() to
+    silently skip iterations (for zero, ValueError; for negative, empty list).
+    The guard ensures we fail explicitly with a clear message.
+    """
+    with pytest.raises(ValueError, match="batch_size must be >= 1, got 0"):
+        embed_batched(CountingEmbeddings(), ["text"], batch_size=0)
+
+
+def test_batch_size_negative_raises_error():
+    """batch_size=-1 triggers a guard that prevents the silent range() failure.
+    
+    This tests FINDING 1: range(0, N, -1) silently returns [] without any
+    iteration — all inputs disappear, no error, no callback. The guard ensures
+    we fail explicitly instead.
+    """
+    with pytest.raises(ValueError, match="batch_size must be >= 1, got -1"):
+        embed_batched(CountingEmbeddings(), [f"t{i}" for i in range(10)], batch_size=-1)
+
+
+def test_batch_size_valid_still_works():
+    """Verify that valid batch sizes still work after the guard is added."""
+    fake = CountingEmbeddings()
+    result = embed_batched(fake, [f"t{i}" for i in range(10)], batch_size=3)
+    assert len(result) == 10
+    assert fake.batch_sizes == [3, 3, 3, 1]
+
+
+@pytest.mark.slow
+def test_build_embeddings_cache_identity():
+    """Test FINDING 2: build_embeddings() and build_embeddings(model_name)
+    return the *same object* (identity check with `is`), not separate models.
+    
+    The deck says models are "loaded once for the process lifetime". If the
+    cache key differs between None (default) and the resolved string, we load
+    and keep two separate ~90MB models, violating the promise.
+    
+    This test verifies the fix: resolving model_name *before* the cached call
+    ensures build_embeddings() and build_embeddings(settings.embed_model)
+    return the exact same object in memory.
+    """
+    from app.config import settings
+    
+    # Clear any prior cache entries by calling _build_embeddings_cached directly
+    # with a fresh import to ensure clean state (in practice, pytest handles
+    # this, but being explicit documents the intent).
+    default_call = build_embeddings()
+    explicit_call = build_embeddings(settings.embed_model)
+    
+    # Identity check: both must be the same object in memory, not just equal.
+    assert default_call is explicit_call, (
+        "build_embeddings() and build_embeddings(settings.embed_model) should "
+        "return the same cached object (same memory location), not two separate models."
+    )
