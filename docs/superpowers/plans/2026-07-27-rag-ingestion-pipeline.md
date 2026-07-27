@@ -538,6 +538,30 @@ requirement is enforced by a check rather than a hope."
 
 **Why cleaning is split from loading:** `clean_pages` is pure, so assertions about zero-width characters are exact. Whether U+200B survives a reportlab→pypdf round-trip is a property of those libraries, not of our code; testing it through a generated PDF would test the wrong thing.
 
+> **Correction applied during execution (commit `bc5785d`).** The `load_pdf` code
+> below contains a real bug, left here so the fix stays legible rather than being
+> silently rewritten. It accumulates `page_offsets` assuming a separator between
+> every page, then builds the text with `separator.join(parts).strip()`. When a
+> leading page cleans to `""` — a logo-only cover, an all-boilerplate title page —
+> the joined string *begins* with the separator and `.strip()` removes it,
+> shifting every later page's true start left while the recorded offsets still
+> assume it is there. One empty leading page makes every citation in the document
+> point a page too early, and the fixture's blank page is *last*, so no test
+> caught it.
+>
+> The shipped implementation extracts a `_join_pages()` helper that measures the
+> leading whitespace `.strip()` removes and subtracts it from every offset, so
+> text and offsets are correct by construction. Three further corrections landed
+> in the same commit: the TOC regex now requires a genuine leader (3+ dots, an
+> ellipsis, or a 6+ character gap) rather than any two whitespace-or-dot
+> characters, which had been deleting lines like `"All rights reserved.  2024"`;
+> boilerplate detection now considers only lines within 3 of a page edge, where
+> running headers actually live, instead of ranking purely by frequency; and the
+> page-attribution tests now pin an interior page, an exact boundary, an empty
+> leading page, and an offset past the end.
+>
+> **`app/pipeline/loader.py` is the source of truth — read it, not the block below.**
+
 - [ ] **Step 1: Write the fixtures**
 
 Create `tests/conftest.py`:
