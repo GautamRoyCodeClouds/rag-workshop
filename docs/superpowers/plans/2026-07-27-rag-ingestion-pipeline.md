@@ -3219,4 +3219,1080 @@ rendering streams while the split does not. No artificial delays."
 
 ---
 
-*Tasks 8–9 (frontend, docs) continue below.*
+## Task 8: The progressive-unlock frontend
+
+**Files:**
+- Create (replacing the Task 7 placeholder): `app/templates/index.html`, `app/static/app.css`, `app/static/app.js`
+
+**Interfaces:**
+- Consumes: `GET /api/config`, and every route from Task 7. The template receives `strategies`, `settings`, `state`, `has_local_pdf`.
+- Produces: no Python interface. Verified by the Task 7 API tests plus the manual checklist in Step 5.
+
+**Design intent:** the page should read as a continuation of the deck, using its tokens — `#0a0f1e` background, cyan `#38e0cf` / amber `#ffb547` / pink `#ff5c8a` / violet `#8b7cff` / green `#5ddb8b`, Bricolage Grotesque + Chivo + JetBrains Mono, and its `card` / `callout` / `pipe`-step patterns. Fonts are referenced by family name only with system fallbacks; **no webfont is fetched**, because the presentation is offline.
+
+- [ ] **Step 1: Write the stylesheet**
+
+Create `app/static/app.css`:
+
+```css
+/* Design tokens lifted from rag-workshop.html so the app reads as slide 53
+   rather than a different product. Fonts are named with system fallbacks and
+   never fetched: the workshop is presented offline. */
+:root {
+  --bg: #0a0f1e;
+  --panel: rgba(255,255,255,.045);
+  --panel2: rgba(255,255,255,.075);
+  --ink: #e9eef9;
+  --muted: #94a3c4;
+  --cyan: #38e0cf;
+  --amber: #ffb547;
+  --pink: #ff5c8a;
+  --violet: #8b7cff;
+  --green: #5ddb8b;
+  --line: rgba(255,255,255,.11);
+  --r: 14px;
+  --sans: 'Chivo', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --display: 'Bricolage Grotesque', 'Chivo', ui-sans-serif, system-ui, sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  -webkit-font-smoothing: antialiased;
+  line-height: 1.5;
+  padding: clamp(1rem, 3vw, 2.5rem);
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+h1, h2, h3 { font-family: var(--display); letter-spacing: -.02em; }
+h1 { font-size: clamp(1.6rem, 4vw, 2.6rem); font-weight: 800; line-height: 1.05; }
+h2 { font-size: clamp(1.05rem, 2vw, 1.5rem); font-weight: 700; }
+.hl { color: var(--cyan); font-style: normal; }
+.muted { color: var(--muted); }
+.mono { font-family: var(--mono); }
+
+header { margin-bottom: 2rem; }
+header p { color: var(--muted); max-width: 62ch; margin-top: .6rem; }
+
+.eyebrow {
+  font-family: var(--mono);
+  font-size: .72rem;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--cyan);
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  margin-bottom: .5rem;
+}
+.eyebrow::after { content: ""; height: 1px; flex: 1; background: linear-gradient(90deg, var(--line), transparent); }
+
+/* --- steps ------------------------------------------------------------- */
+.step {
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--panel);
+  padding: clamp(.9rem, 2vw, 1.5rem);
+  margin-bottom: 1.2rem;
+  transition: opacity .25s, border-color .25s;
+}
+.step[data-locked="true"] {
+  opacity: .38;
+  pointer-events: none;   /* belt; the server is the authority (braces) */
+}
+.step[data-active="true"] { border-color: color-mix(in srgb, var(--cyan) 45%, transparent); }
+.step-head { display: flex; align-items: baseline; gap: .75rem; flex-wrap: wrap; }
+.step-num {
+  font-family: var(--mono);
+  font-size: .72rem;
+  color: var(--cyan);
+  border: 1px solid color-mix(in srgb, var(--cyan) 40%, transparent);
+  border-radius: 999px;
+  padding: .1rem .5rem;
+}
+.step-body { margin-top: 1rem; display: flex; flex-direction: column; gap: .9rem; }
+
+/* --- controls ---------------------------------------------------------- */
+button {
+  font-family: var(--mono);
+  font-size: .78rem;
+  background: var(--panel2);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: .45rem .85rem;
+  cursor: pointer;
+  transition: .15s;
+}
+button:hover:not(:disabled) { border-color: var(--cyan); color: var(--cyan); }
+button.pri { background: var(--cyan); color: #04121a; border-color: var(--cyan); font-weight: 700; }
+button.pri:hover:not(:disabled) { filter: brightness(1.1); color: #04121a; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+.ctl { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center; }
+
+input[type=range] { accent-color: var(--cyan); width: 100%; }
+label.rng { display: flex; flex-direction: column; gap: .2rem; font-family: var(--mono); font-size: .74rem; color: var(--muted); }
+label.rng b { color: var(--cyan); }
+label.rng[data-disabled="true"] { opacity: .4; }
+.sliders { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+
+/* --- strategy cards ---------------------------------------------------- */
+.strategies { display: grid; gap: .7rem; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); }
+.strategy {
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: .35rem;
+  padding: .7rem .8rem;
+  height: 100%;
+}
+.strategy[aria-pressed="true"] {
+  border-color: var(--cyan);
+  background: color-mix(in srgb, var(--cyan) 14%, transparent);
+}
+.strategy b { font-family: var(--display); font-size: .95rem; color: var(--ink); }
+.strategy span { font-size: .72rem; color: var(--muted); line-height: 1.4; font-family: var(--sans); }
+
+/* --- previews ---------------------------------------------------------- */
+.preview {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #070b16;
+  max-height: 44vh;
+  overflow-y: auto;
+  padding: .6rem;
+  font-family: var(--mono);
+  font-size: .72rem;
+}
+.chunk { border-bottom: 1px solid var(--line); padding: .5rem .2rem; }
+.chunk:last-child { border-bottom: 0; }
+.chunk-meta { color: var(--cyan); font-size: .66rem; margin-bottom: .25rem; display: flex; gap: .6rem; flex-wrap: wrap; }
+.chunk-text { color: #d3ddf2; white-space: pre-wrap; word-break: break-word; }
+
+.record { border-bottom: 1px solid var(--line); padding: .6rem .2rem; }
+.record:last-child { border-bottom: 0; }
+.record-id { color: var(--amber); font-size: .66rem; }
+.record-vec { color: var(--violet); font-size: .66rem; margin-top: .3rem; }
+.record details summary { color: var(--muted); cursor: pointer; font-size: .66rem; margin-top: .3rem; }
+.record pre { color: var(--muted); font-size: .64rem; white-space: pre-wrap; margin-top: .3rem; }
+
+/* --- stats, notes, errors --------------------------------------------- */
+.stats { display: flex; gap: 1.2rem; flex-wrap: wrap; font-family: var(--mono); font-size: .74rem; }
+.stats div { display: flex; flex-direction: column; }
+.stats b { color: var(--cyan); font-size: 1.05rem; }
+.stats span { color: var(--muted); font-size: .66rem; }
+
+.callout { border: 1px solid color-mix(in srgb, var(--c, var(--cyan)) 32%, transparent);
+  background: color-mix(in srgb, var(--c, var(--cyan)) 7%, transparent);
+  border-radius: 10px; padding: .55rem .8rem; font-size: .78rem; }
+.callout.warn { --c: var(--amber); }
+.callout.err  { --c: var(--pink); }
+.callout.ok   { --c: var(--green); }
+.callout[hidden] { display: none; }
+
+.bar { height: 8px; background: var(--panel2); border-radius: 4px; overflow: hidden; }
+.bar > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--violet), var(--cyan)); transition: width .2s ease; }
+
+.drop {
+  border: 1px dashed color-mix(in srgb, var(--amber) 55%, transparent);
+  background: color-mix(in srgb, var(--amber) 7%, transparent);
+  border-radius: var(--r); padding: 1.4rem; text-align: center; font-size: .82rem;
+}
+.drop.over { border-color: var(--cyan); background: color-mix(in srgb, var(--cyan) 10%, transparent); }
+
+@media (max-width: 620px) { .sliders { grid-template-columns: 1fr; } }
+@media (prefers-reduced-motion: reduce) { * { transition-duration: .01ms !important; } }
+```
+
+- [ ] **Step 2: Write the template**
+
+Create `app/templates/index.html`:
+
+```html
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAG Ingestion Pipeline</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<header>
+  <div class="eyebrow">Levels 2 &amp; 3 &middot; Live</div>
+  <h1>Documents in, <em class="hl">vectors out.</em></h1>
+  <p>
+    The indexing half of the pipeline, one step at a time. Each step unlocks when
+    the one above it finishes. Defaults are the deck's numbers:
+    {{ settings.default_chunk_size }}-character chunks,
+    {{ settings.default_chunk_overlap }} overlap, recursive splitting.
+  </p>
+</header>
+
+<div class="callout err" id="banner" hidden></div>
+
+<!-- ---------------------------------------------------------- step 1 -->
+<section class="step" id="step-1" data-locked="false" data-active="true">
+  <div class="step-head">
+    <span class="step-num">STEP 1</span>
+    <h2>Load a document</h2>
+  </div>
+  <div class="step-body">
+    <div class="drop" id="drop">
+      <p>Drag a PDF here, or <button type="button" id="pick">choose a file</button></p>
+      <p class="muted mono" style="font-size:.7rem;margin-top:.4rem">
+        Needs a text layer &mdash; scanned PDFs have none. Max {{ settings.max_upload_mb }} MB.
+      </p>
+      <input type="file" id="file" accept="application/pdf" hidden>
+    </div>
+
+    {% if has_local_pdf %}
+    <div class="ctl">
+      <button type="button" id="use-local">Use local document</button>
+      <span class="muted mono" style="font-size:.7rem">Presenter shortcut &mdash; skips the file picker.</span>
+    </div>
+    {% endif %}
+
+    <div class="stats" id="upload-stats" hidden></div>
+    <div class="callout warn" id="clean-note" hidden></div>
+  </div>
+</section>
+
+<!-- ---------------------------------------------------------- step 2 -->
+<section class="step" id="step-2" data-locked="true">
+  <div class="step-head">
+    <span class="step-num">STEP 2</span>
+    <h2>Choose how to cut it</h2>
+  </div>
+  <div class="step-body">
+    <div class="strategies" id="strategies">
+      {% for s in strategies %}
+      <button type="button" class="strategy" data-key="{{ s.key }}"
+              data-uses-size="{{ 'true' if s.uses_size else 'false' }}"
+              data-uses-overlap="{{ 'true' if s.uses_overlap else 'false' }}"
+              data-extra="{{ s.extra_control }}"
+              aria-pressed="{{ 'true' if s.key == settings.default_strategy else 'false' }}">
+        <b>{{ s.label }}</b>
+        <span>{{ s.verdict }}</span>
+      </button>
+      {% endfor %}
+    </div>
+
+    <div class="sliders">
+      <label class="rng" id="size-label">
+        Chunk size <b id="size-out">{{ settings.default_chunk_size }}</b> chars
+        <input type="range" id="size" min="100" max="3000" step="50"
+               value="{{ settings.default_chunk_size }}">
+      </label>
+      <label class="rng" id="overlap-label">
+        Overlap <b id="overlap-out">{{ settings.default_chunk_overlap }}</b> chars
+        <input type="range" id="overlap" min="0" max="500" step="10"
+               value="{{ settings.default_chunk_overlap }}">
+      </label>
+      <label class="rng" id="percentile-label" hidden>
+        Breakpoint percentile <b id="percentile-out">{{ settings.semantic_percentile }}</b>
+        <input type="range" id="percentile" min="50" max="99" step="1"
+               value="{{ settings.semantic_percentile }}">
+      </label>
+    </div>
+
+    <div class="callout" id="strategy-note"></div>
+    <div class="ctl"><button type="button" class="pri" id="run-chunk">Start chunking</button></div>
+  </div>
+</section>
+
+<!-- ---------------------------------------------------------- step 3 -->
+<section class="step" id="step-3" data-locked="true">
+  <div class="step-head">
+    <span class="step-num">STEP 3</span>
+    <h2>The chunks</h2>
+    <span class="muted mono" style="font-size:.72rem" id="chunk-count"></span>
+  </div>
+  <div class="step-body">
+    <div class="callout warn" id="chunk-notes" hidden></div>
+    <div class="preview" id="chunk-preview"></div>
+  </div>
+</section>
+
+<!-- ---------------------------------------------------------- step 4 -->
+<section class="step" id="step-4" data-locked="true">
+  <div class="step-head">
+    <span class="step-num">STEP 4</span>
+    <h2>Embed and store</h2>
+  </div>
+  <div class="step-body">
+    <p class="muted" style="font-size:.82rem">
+      <span class="mono">{{ settings.embed_model }}</span> &middot;
+      {{ settings.embed_dims }} dimensions &middot; normalised, so cosine is a dot product.
+      Runs on CPU, in this container, with no network.
+    </p>
+    <div class="ctl"><button type="button" class="pri" id="run-embed">Start embedding</button></div>
+    <div class="bar"><i id="embed-bar"></i></div>
+    <div class="muted mono" style="font-size:.72rem" id="embed-status"></div>
+  </div>
+</section>
+
+<!-- ---------------------------------------------------------- step 5 -->
+<section class="step" id="step-5" data-locked="true">
+  <div class="step-head">
+    <span class="step-num">STEP 5</span>
+    <h2>What ChromaDB is holding</h2>
+    <span class="muted mono" style="font-size:.72rem" id="record-count"></span>
+  </div>
+  <div class="step-body">
+    <div class="preview" id="records"></div>
+    <div class="ctl">
+      <button type="button" id="prev-page">&larr; Previous</button>
+      <button type="button" id="next-page">Next &rarr;</button>
+      <button type="button" id="reset">Reset everything</button>
+    </div>
+  </div>
+</section>
+
+<script>
+  // Server-rendered state, so a refresh resumes where the presenter left off.
+  window.__STATE__ = {{ state | tojson }};
+</script>
+<script src="/static/app.js"></script>
+</body>
+</html>
+```
+
+- [ ] **Step 3: Write the client script**
+
+Create `app/static/app.js`:
+
+```javascript
+/* Progressive-unlock client.
+ *
+ * No framework and no build step: the interesting code in this repository is the
+ * Python pipeline, and a bundler between a reader and that code would be a tax.
+ *
+ * Two things worth knowing:
+ *  - The server decides which step is unlocked (state.unlocked_step). This file
+ *    only reflects that decision, so the DOM is never the authority.
+ *  - Progress arrives over SSE, with a polling fallback if EventSource fails.
+ *    A flaky projector setup should not kill the preview.
+ */
+'use strict';
+
+const $ = (id) => document.getElementById(id);
+const state = { unlocked: 1, strategy: null, chunkCount: 0, offset: 0, limit: 25 };
+
+/* ------------------------------------------------------------------ helpers */
+
+function banner(message) {
+  const el = $('banner');
+  el.textContent = message;
+  el.hidden = !message;
+}
+
+async function api(path, options = {}) {
+  const response = await fetch(path, options);
+  if (!response.ok) {
+    let detail = `${response.status} ${response.statusText}`;
+    try { detail = (await response.json()).detail || detail; } catch { /* non-JSON */ }
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
+function applyUnlock(step) {
+  state.unlocked = step;
+  for (let n = 1; n <= 5; n++) {
+    const section = $(`step-${n}`);
+    // Steps 2 and 3 unlock together: picking a strategy and running it is one
+    // interaction, so step 3 is reachable whenever step 2 is.
+    const reachable = n <= step || (n === 3 && step >= 2);
+    section.dataset.locked = reachable ? 'false' : 'true';
+    section.dataset.active = n === step ? 'true' : 'false';
+  }
+}
+
+/* Subscribe to a job, preferring SSE and degrading to polling. */
+function follow(jobId, onEvent, onDone) {
+  let settled = false;
+  const finish = (error) => {
+    if (settled) return;
+    settled = true;
+    onDone(error);
+  };
+
+  let source;
+  try {
+    source = new EventSource(`/api/events/${jobId}`);
+  } catch {
+    return poll(jobId, onEvent, finish);
+  }
+
+  source.onmessage = (message) => {
+    const event = JSON.parse(message.data);
+    onEvent(event);
+    if (event.type === 'done' || event.type === 'error') {
+      source.close();
+      finish(event.type === 'error' ? event.error : null);
+    }
+  };
+
+  source.onerror = () => {
+    // Could be a genuine failure or a closed stream after completion. Polling
+    // resolves which, and replays anything missed.
+    source.close();
+    if (!settled) poll(jobId, onEvent, finish);
+  };
+}
+
+/* Polling fallback. Job event history is replayed, so nothing is lost. */
+function poll(jobId, onEvent, finish) {
+  let seen = 0;
+  const tick = async () => {
+    let status;
+    try {
+      status = await api(`/api/status/${jobId}`);
+    } catch (error) {
+      return finish(error.message);
+    }
+    status.events.slice(seen).forEach(onEvent);
+    seen = status.events.length;
+    if (status.status === 'running') return setTimeout(tick, 400);
+    finish(status.status === 'error' ? status.error : null);
+  };
+  tick();
+}
+
+/* ------------------------------------------------------------- step 1: load */
+
+function renderUpload(upload) {
+  $('upload-stats').hidden = false;
+  $('upload-stats').innerHTML = [
+    ['Pages', upload.page_count],
+    ['Characters', upload.char_count.toLocaleString()],
+    ['Blank pages', upload.pages_without_text],
+  ].map(([label, value]) => `<div><b>${value}</b><span>${label}</span></div>`).join('');
+
+  // The deck's "embedding raw junk" gotcha, as a number the room can see.
+  const removed = upload.boilerplate_lines_removed;
+  const invisible = upload.invisible_chars_removed;
+  if (removed || invisible) {
+    $('clean-note').hidden = false;
+    $('clean-note').innerHTML =
+      `Cleaned before embedding: removed <b>${removed}</b> boilerplate lines ` +
+      `(running headers, footers, table-of-contents entries) and stripped ` +
+      `<b>${invisible}</b> invisible characters. All of it would have embedded ` +
+      `perfectly well and polluted every result.`;
+  }
+}
+
+async function loadDocument(request) {
+  banner('');
+  try {
+    const body = await request();
+    renderUpload(body.upload);
+    applyUnlock(body.unlocked_step);
+  } catch (error) {
+    banner(error.message);
+  }
+}
+
+function uploadFile(file) {
+  const form = new FormData();
+  form.append('file', file);
+  return loadDocument(() => api('/api/upload', { method: 'POST', body: form }));
+}
+
+$('pick').onclick = () => $('file').click();
+$('file').onchange = (event) => {
+  if (event.target.files[0]) uploadFile(event.target.files[0]);
+};
+
+const drop = $('drop');
+drop.addEventListener('dragover', (event) => {
+  event.preventDefault();
+  drop.classList.add('over');
+});
+drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+drop.addEventListener('drop', (event) => {
+  event.preventDefault();
+  drop.classList.remove('over');
+  if (event.dataTransfer.files[0]) uploadFile(event.dataTransfer.files[0]);
+});
+
+if ($('use-local')) {
+  $('use-local').onclick = () =>
+    loadDocument(() => api('/api/use-local', { method: 'POST' }));
+}
+
+/* -------------------------------------------------- step 2: pick a strategy */
+
+function selectStrategy(button) {
+  document.querySelectorAll('.strategy').forEach((el) =>
+    el.setAttribute('aria-pressed', String(el === button)));
+  state.strategy = button.dataset.key;
+
+  // Relabel the controls, because the sliders do not mean the same thing for
+  // every strategy -- and disabled controls must look disabled.
+  const usesSize = button.dataset.usesSize === 'true';
+  const usesOverlap = button.dataset.usesOverlap === 'true';
+  $('size').disabled = !usesSize;
+  $('overlap').disabled = !usesOverlap;
+  $('size-label').dataset.disabled = String(!usesSize);
+  $('overlap-label').dataset.disabled = String(!usesOverlap);
+  $('percentile-label').hidden = button.dataset.extra !== 'percentile';
+
+  const notes = {
+    fixed: 'Watch the boundaries: this cuts on character count alone and will slice words in half.',
+    recursive: 'Tries paragraph, then line, then sentence, then word. The deck\'s recommended default.',
+    structure: 'Splits on the document\'s own headings. If it finds none, it says so and falls back to recursive.',
+    semantic: 'Size and overlap do not apply: cut points come from embedding distance between neighbouring sentences. Slower, because every sentence gets embedded first.',
+    parent: 'Small children get embedded, larger parents are kept alongside. The retrieval payoff needs the query build; here you see the structure.',
+  };
+  $('strategy-note').textContent = notes[state.strategy] || '';
+}
+
+document.querySelectorAll('.strategy').forEach((button) => {
+  button.onclick = () => selectStrategy(button);
+});
+
+[['size', 'size-out'], ['overlap', 'overlap-out'], ['percentile', 'percentile-out']]
+  .forEach(([input, output]) => {
+    $(input).oninput = () => { $(output).textContent = $(input).value; };
+  });
+
+/* ------------------------------------------------- step 3: run the chunking */
+
+$('run-chunk').onclick = async () => {
+  banner('');
+  $('run-chunk').disabled = true;
+  $('chunk-preview').innerHTML = '';
+  $('chunk-notes').hidden = true;
+  $('chunk-notes').innerHTML = '';
+  state.chunkCount = 0;
+
+  const notes = [];
+  try {
+    const { job_id } = await api('/api/chunk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        strategy: state.strategy,
+        size: Number($('size').value),
+        overlap: Number($('overlap').value),
+        percentile: Number($('percentile').value),
+      }),
+    });
+
+    follow(job_id, (event) => {
+      if (event.type === 'chunk') {
+        state.chunkCount += 1;
+        const chunk = document.createElement('div');
+        chunk.className = 'chunk';
+        const parent = event.parent_id ? ` · parent ${event.parent_id}` : '';
+        chunk.innerHTML =
+          `<div class="chunk-meta"><span>#${event.index}</span>` +
+          `<span>${event.char_count} chars</span><span>page ${event.page}</span>` +
+          `<span>${parent}</span></div>` +
+          `<div class="chunk-text"></div>`;
+        // textContent, not innerHTML: chunk text is document content and must
+        // never be interpreted as markup.
+        chunk.querySelector('.chunk-text').textContent = event.text;
+        $('chunk-preview').appendChild(chunk);
+        $('chunk-count').textContent = `${state.chunkCount} chunks`;
+      } else if (event.type === 'note') {
+        notes.push(event.message);
+      } else if (event.type === 'stage') {
+        $('chunk-count').textContent = event.message;
+      }
+    }, (error) => {
+      $('run-chunk').disabled = false;
+      if (error) return banner(error);
+      if (notes.length) {
+        $('chunk-notes').hidden = false;
+        $('chunk-notes').innerHTML = notes.map((n) => `<div>${n}</div>`).join('');
+      }
+      $('chunk-count').textContent = `${state.chunkCount} chunks`;
+      applyUnlock(4);
+    });
+  } catch (error) {
+    $('run-chunk').disabled = false;
+    banner(error.message);
+  }
+};
+
+/* ------------------------------------------------------- step 4: embeddings */
+
+$('run-embed').onclick = async () => {
+  banner('');
+  $('run-embed').disabled = true;
+  const started = Date.now();
+
+  try {
+    const { job_id } = await api('/api/embed', { method: 'POST' });
+
+    follow(job_id, (event) => {
+      if (event.type === 'embedded') {
+        const pct = Math.round((event.done / event.total) * 100);
+        $('embed-bar').style.width = `${pct}%`;
+        const seconds = ((Date.now() - started) / 1000).toFixed(1);
+        $('embed-status').textContent =
+          `${event.done} / ${event.total} chunks embedded · ${seconds}s`;
+      } else if (event.type === 'stage') {
+        $('embed-status').textContent = event.message;
+      } else if (event.type === 'summary') {
+        $('embed-status').textContent =
+          `${event.vectors_written} vectors written to ChromaDB`;
+      }
+    }, async (error) => {
+      $('run-embed').disabled = false;
+      if (error) return banner(error);
+      $('embed-bar').style.width = '100%';
+      applyUnlock(5);
+      state.offset = 0;
+      await loadRecords();
+    });
+  } catch (error) {
+    $('run-embed').disabled = false;
+    banner(error.message);
+  }
+};
+
+/* -------------------------------------------------- step 5: browse the store */
+
+async function loadRecords() {
+  try {
+    const page = await api(`/api/collection?offset=${state.offset}&limit=${state.limit}`);
+    $('record-count').textContent =
+      `${page.total} records · showing ${page.offset + 1}-${page.offset + page.records.length}`;
+
+    $('records').innerHTML = '';
+    page.records.forEach((record) => {
+      const el = document.createElement('div');
+      el.className = 'record';
+      el.innerHTML =
+        `<div class="record-id"></div><div class="chunk-text"></div>` +
+        `<div class="record-vec"></div>` +
+        `<details><summary>metadata</summary><pre></pre></details>`;
+      el.querySelector('.record-id').textContent = record.id;
+      el.querySelector('.chunk-text').textContent = record.text;
+      // The norm is displayed so the room can confirm normalisation happened
+      // rather than taking the flag on trust.
+      el.querySelector('.record-vec').textContent =
+        `[${record.vector_preview.join(', ')}, ...] ` +
+        `${record.dims} dims · norm ${record.vector_norm}`;
+      el.querySelector('pre').textContent = JSON.stringify(record.metadata, null, 2);
+      $('records').appendChild(el);
+    });
+
+    $('prev-page').disabled = page.offset === 0;
+    $('next-page').disabled = page.offset + page.records.length >= page.total;
+  } catch (error) {
+    banner(error.message);
+  }
+}
+
+$('prev-page').onclick = () => {
+  state.offset = Math.max(0, state.offset - state.limit);
+  loadRecords();
+};
+$('next-page').onclick = () => {
+  state.offset += state.limit;
+  loadRecords();
+};
+
+$('reset').onclick = async () => {
+  if (!confirm('Clear this session and drop the ChromaDB collection?')) return;
+  try {
+    const body = await api('/api/reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ drop_collection: true }),
+    });
+    $('chunk-preview').innerHTML = '';
+    $('records').innerHTML = '';
+    $('upload-stats').hidden = true;
+    $('clean-note').hidden = true;
+    $('embed-bar').style.width = '0';
+    $('embed-status').textContent = '';
+    $('chunk-count').textContent = '';
+    $('record-count').textContent = '';
+    applyUnlock(body.unlocked_step);
+  } catch (error) {
+    banner(error.message);
+  }
+};
+
+/* ----------------------------------------------------------------- start-up */
+
+(function init() {
+  const served = window.__STATE__ || {};
+  selectStrategy(document.querySelector('.strategy[aria-pressed="true"]'));
+  if (served.upload) renderUpload(served.upload);
+  applyUnlock(served.unlocked_step || 1);
+  if ((served.unlocked_step || 1) >= 5) loadRecords();
+})();
+```
+
+- [ ] **Step 4: Confirm the API tests still pass against the real template**
+
+Run: `docker compose run --rm app pytest tests/test_api.py -v`
+Expected: PASS, 21 passed — `test_the_page_lists_all_five_strategies` now checks the real template rather than the placeholder.
+
+- [ ] **Step 5: Manual verification checklist**
+
+```bash
+docker compose up -d --build
+```
+
+Open `http://localhost:8080` and confirm each item:
+
+- [ ] Steps 2–5 are visibly dimmed and unclickable on load
+- [ ] Dragging a PDF onto step 1 shows page count, characters, and the cleaning counts
+- [ ] Step 2 unlocks; **Recursive** is preselected
+- [ ] Selecting **Semantic** disables and dims the size and overlap sliders, and reveals the percentile slider
+- [ ] *Start chunking* fills the preview; each chunk shows index, char count, and page
+- [ ] Selecting **Fixed size** at ~120 chars visibly slices words in half
+- [ ] Selecting **Structure aware** on a heading-free PDF shows the fallback note
+- [ ] Step 4's progress bar advances in stages, and elapsed seconds increase
+- [ ] Step 5 lists records with a vector preview and `norm 1.0`
+- [ ] Pagination buttons disable correctly at both ends
+- [ ] Reloading the browser mid-demo keeps the completed steps unlocked
+- [ ] *Reset everything* returns the page to step 1 only
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add app/templates/index.html app/static/app.css app/static/app.js
+git commit -m "feat: progressive-unlock frontend using the deck's design tokens
+
+No framework and no build step, so nothing sits between a reader and the Python
+pipeline. Fonts are named with system fallbacks and never fetched, because the
+workshop is presented offline.
+
+Unlock state comes from the server, so the DOM is never the authority. Strategy
+cards relabel the sliders per strategy -- semantic disables size and overlap
+rather than showing controls that silently do nothing. Chunk and record text is
+set via textContent, never innerHTML, since document content must not be
+interpreted as markup."
+```
+
+---
+
+## Task 9: CLAUDE.md and README.md
+
+**Files:**
+- Create: `CLAUDE.md`, `README.md`
+
+**Interfaces:**
+- Consumes: the finished repository.
+- Produces: no code interface.
+
+- [ ] **Step 1: Write CLAUDE.md**
+
+Create `CLAUDE.md`:
+
+```markdown
+# CLAUDE.md
+
+Context for working on this repository.
+
+## What this is
+
+A teaching app built for a two-hour workshop, *RAG, Embeddings & Vector
+Databases*. The slide deck is `rag-workshop.html` (52 slides, 6 levels), and this
+app is the live counterpart to its indexing half: a PDF goes in, vectors land in
+ChromaDB, and the audience watches each stage happen.
+
+It is optimised for **being read aloud and cloned by attendees**, not for
+production throughput. When a change would make the code faster but harder to
+follow, prefer legibility and say why in a comment.
+
+## Scope
+
+Implemented: load → clean → chunk → embed → store → inspect (deck Levels 2–3).
+
+Not implemented, and deliberately so: retrieval, hybrid search, reranking, prompt
+assembly, generation, chat, evaluation, auth, multi-user sessions, access-control
+filtering. These are deck Levels 5–6 and a separate build.
+
+## Architecture
+
+    Browser --HTTP + SSE--> app (FastAPI :8080) --HTTP--> chromadb (:8000)
+                              |                            |
+                        /data/sessions/*.json        chroma-data volume
+                        /data/uploads/*.pdf
+                        /opt/hf  (MiniLM weights, baked in)
+
+| Path | Responsibility |
+|---|---|
+| `app/config.py` | Every tunable, each default annotated with its deck slide |
+| `app/pipeline/loader.py` | PDF → cleaned text, cleaning counts, page-offset map |
+| `app/pipeline/chunkers.py` | The five strategies. **Read this first** |
+| `app/pipeline/embedder.py` | MiniLM wrapper, batched with progress |
+| `app/pipeline/store.py` | Chroma writes and record reads |
+| `app/session.py` | Session state + JSON mirror; owns the unlock rule |
+| `app/jobs.py` | Job registry and SSE queues |
+| `app/main.py` | Routes |
+
+## Decisions that look like bugs but are not
+
+**The deck's code slides use LlamaIndex; this app uses LangChain.** Intentional.
+LangChain was a hard requirement; the deck was left unmodified. The presenter
+bridges the gap verbally. Do not "fix" either side.
+
+**Writes go through the raw `chromadb` client, not `langchain-chroma`.**
+`langchain-chroma` computes embeddings internally, which would make both
+per-batch progress reporting and the vector preview impossible. LangChain still
+supplies the loader, all five splitters, and the embedding wrapper.
+
+**`OLLAMA_BASE_URL` is read by nothing.** It is a documented seam for the future
+query build, where `deepseek-r1:1.5b` is the intended generation model. Nothing
+in ingestion needs an LLM. It is the only dead config entry, and it is on purpose.
+
+**Semantic chunking uses an embeddings model, not an LLM.** `SemanticChunker`
+embeds sentences and cuts where cosine distance between neighbours exceeds a
+percentile. No text is generated. Expect to explain this more than once.
+
+**Chunk streaming is partly cosmetic, and honestly so.** LangChain's splitters
+return every chunk at once, so step 3 streams the *rendering*, not the splitting.
+Embedding progress is genuinely per batch. **Never add artificial delays to make
+progress look smoother** — a teaching tool that fakes its own telemetry is worse
+than one with a jumpy progress bar.
+
+**`parent_id` is `""` rather than `None`.** Chroma metadata rejects null values.
+
+**Delete-before-write is load-bearing.** Content-hash ids make a same-parameters
+re-run an overwrite, but shrinking the chunk count would orphan the earlier run's
+tail. Records are deleted per `(doc_id, strategy)` before writing. Two
+*different* strategies are meant to coexist for comparison.
+
+## The private document
+
+The presenter demos against an internal PDF that must not be published.
+
+- `.gitignore` excludes `*.pdf` **absolutely, with no allow-list**. Do not add
+  one — tests generate PDFs at runtime instead.
+- The document is **never `COPY`'d into the image**; that would leak it on any
+  image push. It is bind-mounted read-only via `docker-compose.override.yml`
+  (gitignored). See `docker-compose.override.yml.example`.
+- `.dockerignore` also excludes `*.pdf`, so no document reaches the build context.
+- `README.md` must never reference it.
+
+If you are asked to add a sample document, generate a synthetic one — do not
+reach for the presenter's file.
+
+## Where the defaults come from
+
+| Setting | Value | Slide |
+|---|---|---|
+| Chunk size | 700 | Level 6, "Sensible defaults for version one" |
+| Overlap | 100 | Same |
+| Strategy | recursive | Level 3, "the right default" |
+| Embedding model | all-MiniLM-L6-v2, 384d | Level 2 model table, self-host row |
+| Metric | cosine, normalised | Level 6 defaults |
+
+Changing one of these means changing the slide too, or the demo starts
+contradicting the teaching.
+
+## Commands
+
+    docker compose up -d --build          # start; open localhost:8080
+    docker compose run --rm app pytest -v # full suite
+    docker compose run --rm app pytest -m "not slow"   # skip the real-model test
+    docker compose down                   # stop, keep vectors
+    docker compose down -v                # stop, delete vectors
+
+The model is baked into the image. To verify that still holds after touching the
+Dockerfile:
+
+    docker compose run --rm --network none app python -c \
+      "from sentence_transformers import SentenceTransformer as S; \
+       print(S('sentence-transformers/all-MiniLM-L6-v2').get_sentence_embedding_dimension())"
+
+Expected: `384`. If this fails, the offline presentation requirement is broken.
+
+## Conventions
+
+- **High comment density in `app/pipeline/`.** Attendees read those four files
+  first. Every strategy docstring quotes the deck's verdict for that strategy.
+- Normal comment density elsewhere.
+- Tests document behaviour rather than chase coverage. Several deliberately
+  assert that a strategy is *bad* in the way the deck says it is.
+- No PDF, ever, in a commit.
+
+## Design documents
+
+- Spec: `docs/superpowers/specs/2026-07-27-rag-ingestion-pipeline-design.md`
+- Plan: `docs/superpowers/plans/2026-07-27-rag-ingestion-pipeline.md`
+```
+
+- [ ] **Step 2: Write README.md**
+
+Create `README.md`:
+
+```markdown
+# RAG Ingestion Pipeline
+
+A step-by-step, watchable version of the indexing half of a RAG system. Load a
+PDF, choose how to cut it, watch the chunks appear, embed them locally, and
+inspect exactly what landed in the vector database.
+
+Built as the live demo for a two-hour workshop on RAG, embeddings and vector
+databases. The slides are in `rag-workshop.html` — open it in a browser.
+
+## Quick start
+
+You need Docker and about 2GB of disk.
+
+    git clone <this-repo>
+    cd class-rag
+    docker compose up -d --build
+
+The first build takes a few minutes: it downloads the embedding model and bakes
+it into the image, so nothing needs the network afterwards.
+
+Then open <http://localhost:8080> and drag in a PDF.
+
+## Bring your own PDF
+
+No document ships with this repository. Any PDF with a **text layer** works —
+anything you can select text in.
+
+A good demo document has:
+
+- real headings (so structure-aware chunking has something to find)
+- a table of contents (so you can watch it get stripped before embedding)
+- more than a few pages (so chunk counts are interesting)
+
+**Scanned PDFs will not work.** Their pages are images, so there is no text to
+extract; the app tells you this rather than silently producing an empty
+collection. Run OCR over such a document first.
+
+## The five steps
+
+1. **Load** — extract text, then clean it. Running headers, footers, and
+   table-of-contents lines are removed and counted, because all of them embed
+   perfectly well and then pollute every search result.
+2. **Choose a strategy** — fixed size, recursive, structure-aware, semantic, or
+   parent-document. Each card carries the verdict from the workshop's Level 3
+   table. Defaults are 700-character chunks with 100 overlap.
+3. **Chunk** — chunks stream into a scrollable preview with index, character
+   count, and source page. Try fixed size at ~120 characters to see words get
+   sliced in half; that failure is the point.
+4. **Embed** — `all-MiniLM-L6-v2` runs on CPU inside the container. 384
+   dimensions, normalised, no API key, no network.
+5. **Inspect** — browse the ChromaDB records: id, text, full metadata, the first
+   eight vector dimensions, and the vector norm.
+
+## Which file matches which part of the workshop
+
+| Workshop level | Code |
+|---|---|
+| Level 2 — Embeddings | `app/pipeline/embedder.py` |
+| Level 3 — Chunking | `app/pipeline/chunkers.py` |
+| Level 4 — Vector DBs | `app/pipeline/store.py` |
+| Cleaning gotcha (Level 2) | `app/pipeline/loader.py` |
+
+`app/pipeline/chunkers.py` is the one to read first. Each strategy is a single
+function whose docstring quotes what the slides say about it.
+
+## Tests
+
+    docker compose run --rm app pytest -v
+
+Test PDFs are generated at runtime, so the suite is self-contained. One test
+loads the real embedding model and is marked `slow`:
+
+    docker compose run --rm app pytest -m "not slow"
+
+## Configuration
+
+Copy `.env.example` to `.env` to change anything. Every default is a number from
+the workshop, and each is commented with the slide it came from.
+
+## Stopping
+
+    docker compose down       # keeps your vectors
+    docker compose down -v    # deletes them
+
+## Not included
+
+Retrieval, reranking, and generation — the querying half. This app deliberately
+stops where the vectors land. The workshop covers the rest in Levels 5 and 6.
+
+## Licence
+
+MIT.
+```
+
+- [ ] **Step 3: Verify docs match reality**
+
+```bash
+# Every command in the READMEs should exist and every path should resolve.
+grep -oE 'app/[a-z_/]+\.(py|css|js|html)' README.md CLAUDE.md | cut -d: -f2 | sort -u | \
+  while read -r path; do [ -e "$path" ] || echo "MISSING: $path"; done
+```
+
+Expected: no output.
+
+```bash
+docker compose down -v && docker compose up -d --build && sleep 20
+curl -s localhost:8080/api/health | grep -q '"status":"ok"' && echo "quickstart works"
+```
+
+Expected: `quickstart works`
+
+- [ ] **Step 4: Confirm no PDF is tracked**
+
+```bash
+git ls-files | grep -i '\.pdf$' && echo "FAIL: a PDF is tracked" || echo "OK: no PDF tracked"
+```
+
+Expected: `OK: no PDF tracked`
+
+- [ ] **Step 5: Run the full suite one last time**
+
+```bash
+docker compose run --rm app pytest -v
+```
+
+Expected: 96 passed (7 config + 14 loader + 24 chunkers + 6 embedder + 14 store + 10 session + 21 api)
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add CLAUDE.md README.md
+git commit -m "docs: CLAUDE.md and attendee-facing README
+
+CLAUDE.md records the decisions that look like bugs but are not -- the
+LangChain/LlamaIndex split with the deck, the raw chromadb client, the
+deliberately unused Ollama seam, and why chunk streaming is partly cosmetic --
+so none of them get 'fixed' later.
+
+README never references the internal document: attendees bring their own PDF,
+and the constraints on it (needs a text layer) are stated with the reason."
+```
+
+---
+
+## Self-Review
+
+**Spec coverage.** Every section of the spec maps to a task: decisions and config → Task 1; private-document handling → Tasks 1 (`.dockerignore`, override example) and 9 (CLAUDE.md); loader with cleaning and page attribution → Task 2; the five strategies, slider semantics, heading detection, parent caveat → Task 3; embedder and normalisation → Task 4; metadata schema and delete-before-write → Task 5; session persistence and unlock rule → Task 6; data flow, endpoints, SSE and its fallback → Task 7; frontend tokens and step layout → Task 8; documentation → Task 9. The spec's error-handling table is covered across Tasks 2 (scanned PDF), 5 (idempotency), 7 (size/type limits, Chroma 503, unknown strategy), and 8 (banner, polling fallback).
+
+**Interface consistency.** `page_for_offset` has the same name and signature in `LoadResult` and `SessionState`. `Chunk` field names (`index`, `text`, `start`, `strategy`, `parent_id`, `parent_text`) are identical across Tasks 3, 5, 6 and 7. `write_chunks` is called in Task 7 with exactly the keyword arguments Task 5 defines. `STRATEGIES` keys (`fixed`, `recursive`, `structure`, `semantic`, `parent`) match the template's `data-key` values and the note lookup in `app.js`. `registry.publish`/`finish` signatures match their use in `main.py`.
+
+**Two fixes applied during review:**
+
+1. Task 7's tests originally imported `store` from `app.session` while monkeypatching `main_module.store`; the fixture now patches the attribute on `main_module`, which is what the routes actually read.
+2. `_locate` initially searched from `cursor` alone, which fails when overlap places a chunk's start behind the cursor. It now rewinds by `len(needle)` before searching, with a whole-document fallback.
+
+**Known deferrals, stated rather than hidden:**
+
+- Session state is per-process. Two Uvicorn workers would not share it. Fine for a single-presenter demo; `--workers 1` is implied by the Compose `CMD`.
+- `registry` never evicts finished jobs. Bounded by one demo's lifetime; a long-running deployment would need a reaper.
+- `test_status_reports_a_finished_chunk_job` relies on `TestClient` draining background tasks before returning. If a future FastAPI release changes that, the assertion should switch to polling rather than being loosened.
+
