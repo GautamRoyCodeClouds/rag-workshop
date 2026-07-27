@@ -79,6 +79,10 @@ class JobRegistry:
     def publish(self, job: Job, event: dict) -> None:
         """Append a cursor-bearing event and safely notify all live consumers."""
         with self._lock:
+            # A cancelled asyncio task can leave its to_thread worker running.
+            # Its late callback must not put progress after the terminal event.
+            if job.status != "running":
+                return
             self._publish_locked(job, event)
 
     def finish(self, job: Job, status: str, error: str = "", session: dict | None = None) -> None:

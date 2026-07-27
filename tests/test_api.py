@@ -190,6 +190,14 @@ class TestChunkAndEmbed:
     def test_embedding_starts_an_async_job_after_chunking(self, client, structured_pdf, monkeypatch):
         from app.pipeline.chunkers import Chunk
 
+        class DeterministicEmbeddings:
+            def __init__(self) -> None:
+                self.batches: list[list[str]] = []
+
+            def embed_documents(self, texts: list[str]) -> list[list[float]]:
+                self.batches.append(list(texts))
+                return [[float(len(text))] + [0.0] * 383 for text in texts]
+
         self.upload(client, structured_pdf)
         state = main_module.store.get_or_create(client.cookies.get("rag_session"))
         state.chunks = [
@@ -200,14 +208,8 @@ class TestChunkAndEmbed:
         main_module.store.save(state)
         monkeypatch.setattr(main_module, "settings", replace(main_module.settings, embed_batch_size=1))
 
-        monkeypatch.setattr(main_module, "build_embeddings", lambda: object())
-
-        def fake_embed(_model, _texts, _batch_size, progress):
-            progress(1, 2)
-            progress(2, 2)
-            return [[1.0] + [0.0] * 383, [0.0, 1.0] + [0.0] * 382]
-
-        monkeypatch.setattr(main_module, "embed_batched", fake_embed)
+        embeddings = DeterministicEmbeddings()
+        monkeypatch.setattr(main_module, "build_embeddings", lambda: embeddings)
         response = client.post("/api/embed")
         assert response.status_code == 202
         job_id = response.json()["job_id"]
@@ -219,6 +221,7 @@ class TestChunkAndEmbed:
         assert status["status"] == "done"
         progress = [event for event in status["events"] if event["type"] == "embedded"]
         assert [(event["done"], event["total"]) for event in progress] == [(1, 2), (2, 2)]
+        assert embeddings.batches == [["First chunk"], ["Second chunk"]]
         assert status["session"]["unlocked_step"] == 5
 
     def test_status_for_an_unknown_job_is_404(self, client):
@@ -333,9 +336,9 @@ class TestJobRegistry:
             for line in sse.text.splitlines()
             if line.startswith("data: ")
         ]
-        polling = client.get(f"/api/status/{job.job_id}?after=2").json()
+        polling = client.get(f"/api/status/{job.job_id}?after=3").json()
         assert seen == [2, 3]
-        assert [event["id"] for event in polling["events"]] == [3]
+        assert polling["events"] == []
         assert polling["cursor"] == 3
 
     def test_terminal_snapshot_contains_the_terminal_event(self):
@@ -345,6 +348,23 @@ class TestJobRegistry:
         snapshot = registry.snapshot(job)
         assert snapshot["status"] == "done"
         assert snapshot["events"][-1]["type"] == "done"
+
+    def test_worker_progress_cannot_follow_a_terminal_cancellation(self):
+        async def publish_after_cancel() -> None:
+            registry = JobRegistry(loop=asyncio.get_running_loop())
+            job = registry.create()
+            registry.publish(job, {"type": "stage"})
+            registry.finish(job, "cancelled", "replaced")
+            worker = threading.Thread(
+                target=registry.publish,
+                args=(job, {"type": "embedded", "done": 1, "total": 2}),
+            )
+            worker.start()
+            worker.join()
+            assert [event["type"] for event in job.events] == ["stage", "cancelled"]
+            assert job.events[-1]["type"] == "cancelled"
+
+        asyncio.run(publish_after_cancel())
 
 
 class TestJobOwnershipAndAsyncBoundaries:

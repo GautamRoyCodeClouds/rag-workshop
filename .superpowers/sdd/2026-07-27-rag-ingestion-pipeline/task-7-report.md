@@ -174,3 +174,52 @@ evicted yet. This remains appropriate for the single-document workshop process,
 but a long-lived multi-user deployment would need TTL/size-based job eviction.
 The required `Job.queue` remains available for the public interface; production
 SSE uses per-subscriber queues so it does not duplicate replay frames.
+
+---
+
+## Fix round 2/5 — real batching coverage and terminal-event integrity
+
+### Findings fixed
+
+- The embedding API regression no longer replaces `embed_batched`. It supplies
+  only a deterministic, inexpensive embeddings object and runs the real
+  `app.pipeline.embedder.embed_batched` path through the API. Its recorded
+  calls prove the two texts were encoded as two size-one batches, while the
+  API events prove the real per-batch callbacks were `(1, 2)` then `(2, 2)`.
+- The SSE-to-poll hand-off now uses the cursor that was actually consumed:
+  after the SSE response delivered IDs 2 and 3, polling uses `after=3` and
+  receives no duplicate event.
+- `JobRegistry.publish` now ignores post-terminal publication. `finish` keeps
+  its dedicated locked terminal append, so late worker-thread callbacks cannot
+  put progress after `done`, `error`, or `cancelled`.
+
+### RED/GREEN evidence
+
+The new terminal-publication test was added before changing the registry:
+
+```text
+docker compose run --rm app pytest tests/test_api.py -v
+1 failed, 36 passed
+
+... ['stage', 'cancelled', 'embedded'] == ['stage', 'cancelled']
+```
+
+That is the actual cancelled-`to_thread` race: worker progress appended after
+the terminal event. After making ordinary publication a no-op for terminal
+jobs:
+
+```text
+docker compose run --rm app pytest tests/test_api.py -v
+37 passed, 16 warnings
+
+docker compose run --rm app pytest -m 'not slow' -v
+149 passed, 2 deselected, 219 warnings
+```
+
+The former cursor assertion shape was also deliberately exercised: it asked
+polling for `after=2` even though SSE had already delivered ID 3, while
+expecting no events. The targeted Docker test failed with the correctly
+redelivered `{'id': 3, 'type': 'done'}`. The final regression uses `after=3`.
+
+Warnings are unchanged dependency/test-client noise: Chroma/Pydantic
+deprecations and one Starlette per-request-cookie deprecation.
