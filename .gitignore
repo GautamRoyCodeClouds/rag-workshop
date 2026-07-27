@@ -57,3 +57,6 @@ hf_home/
 
 # SDD scratch
 .superpowers/
+
+# Knowledge-graph output from the graphify skill (regenerable, 1.5M)
+graphify-out/

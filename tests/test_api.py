@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 import subprocess
 import threading
@@ -103,8 +104,15 @@ class TestPage:
         assert "https://" not in combined
 
     def test_the_stylesheet_keeps_hidden_controls_out_of_the_layout(self, client):
+        # The rule matters, its formatting does not: several rules set `display`
+        # on elements the frontend hides with the `hidden` attribute, so without
+        # an !important override a "hidden" panel would stay on screen. Matched
+        # whitespace-insensitively so reformatting the stylesheet cannot fail a
+        # test about behaviour.
         stylesheet = client.get("/static/app.css").text
-        assert "[hidden] { display:none !important; }" in stylesheet
+        assert re.search(
+            r"\[hidden\]\s*\{[^}]*display\s*:\s*none\s*!important", stylesheet
+        ), "the global [hidden] { display: none !important } rule is missing"
 
     def test_config_exposes_the_deck_defaults(self, client):
         data = client.get("/api/config").json()

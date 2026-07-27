@@ -1,13 +1,576 @@
-/* Deck-derived teaching console: font names only, with offline system fallbacks. */
-:root { --bg:#0a0f1e; --panel:rgba(255,255,255,.045); --panel2:rgba(255,255,255,.075); --ink:#e9eef9; --muted:#94a3c4; --cyan: #38e0cf; --amber:#ffb547; --pink:#ff5c8a; --violet:#8b7cff; --green:#5ddb8b; --line:rgba(255,255,255,.11); --r:14px; --sans:'Chivo',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif; --display:'Bricolage Grotesque','Chivo',ui-sans-serif,system-ui,sans-serif; --mono:'JetBrains Mono',ui-monospace,'SF Mono',Menlo,Consolas,monospace; }
-* { box-sizing:border-box; margin:0; padding:0; } [hidden] { display:none !important; }
-body { background:var(--bg); color:var(--ink); font-family:var(--sans); -webkit-font-smoothing:antialiased; line-height:1.5; max-width:1100px; margin:0 auto; padding:clamp(1rem,3vw,2.8rem); }
-h1,h2,h3 { font-family:var(--display); letter-spacing:-.03em; } h1 { font-size:clamp(2rem,5vw,3.6rem); font-weight:800; line-height:.98; max-width:14ch; } h2 { font-size:clamp(1.1rem,2vw,1.45rem); font-weight:700; } button,input { font:inherit; } button { font-family:var(--mono); font-size:.75rem; background:var(--panel2); color:var(--ink); border:1px solid var(--line); border-radius:8px; padding:.5rem .82rem; cursor:pointer; transition:border-color .15s,color .15s,background .15s; } button:hover:not(:disabled) { color:var(--cyan); border-color:var(--cyan); } button:disabled { cursor:not-allowed; opacity:.45; } button:focus-visible,input:focus-visible { outline:3px solid var(--amber); outline-offset:3px; } button.pri { background:var(--cyan); border-color:var(--cyan); color:#04121a; font-weight:800; } button.pri:hover:not(:disabled) { color:#04121a; filter:brightness(1.08); } button.danger:hover:not(:disabled) { border-color:var(--pink); color:var(--pink); }
-.masthead { margin:clamp(.5rem,3vw,2.5rem) 0 2rem; } .masthead p { color:var(--muted); max-width:63ch; margin-top:.8rem; font-size:.93rem; } .hl { color:var(--cyan); font-style:normal; } .muted { color:var(--muted); } .mono { font-family:var(--mono); font-size:.72rem; } .eyebrow { color:var(--cyan); display:flex; align-items:center; gap:.6rem; font:700 .69rem/1 var(--mono); letter-spacing:.15em; text-transform:uppercase; margin-bottom:.8rem; } .eyebrow::after { content:''; height:1px; flex:1; max-width:15rem; background:linear-gradient(90deg,var(--line),transparent); }
-.pipeline { position:relative; padding-left:clamp(0rem,3vw,2.3rem); } .rail { position:absolute; left:7px; top:1.4rem; bottom:2rem; width:1px; background:linear-gradient(var(--cyan),var(--violet) 55%,var(--line)); } .step { position:relative; border:1px solid var(--line); border-radius:var(--r); background:var(--panel); padding:clamp(1rem,2.5vw,1.55rem); margin-bottom:1.1rem; transition:opacity .25s,border-color .25s,transform .25s; } .step::before { content:''; position:absolute; width:9px; height:9px; border:2px solid var(--bg); border-radius:50%; background:var(--cyan); left:calc(clamp(0rem,3vw,2.3rem) * -1 - 5px); top:1.72rem; box-shadow:0 0 0 1px var(--cyan); } .step[data-locked='true'] { opacity:.36; filter:saturate(.55); } .step[data-active='true'] { border-color:color-mix(in srgb,var(--cyan) 52%,transparent); box-shadow:0 0 0 1px color-mix(in srgb,var(--cyan) 13%,transparent),0 16px 40px rgba(0,0,0,.12); } .step[data-active='true']::before { box-shadow:0 0 0 1px var(--cyan),0 0 20px var(--cyan); } .step-head { display:flex; align-items:baseline; gap:.7rem; flex-wrap:wrap; } .step-num,.step-state { font:700 .67rem/1 var(--mono); letter-spacing:.05em; } .step-num { color:var(--cyan); border:1px solid color-mix(in srgb,var(--cyan) 50%,transparent); padding:.18rem .45rem; border-radius:999px; } .step-state { color:var(--muted); margin-left:auto; text-transform:uppercase; } .step-body { margin-top:1rem; display:flex; flex-direction:column; gap:.9rem; }
-.drop { border:1px dashed color-mix(in srgb,var(--amber) 62%,transparent); background:color-mix(in srgb,var(--amber) 7%,transparent); border-radius:var(--r); padding:1.35rem; text-align:center; font-size:.86rem; } .drop .muted { margin-top:.45rem; } .drop.over { border-color:var(--cyan); background:color-mix(in srgb,var(--cyan) 10%,transparent); } .ctl { display:flex; flex-wrap:wrap; align-items:center; gap:.6rem; }
-.strategies { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,190px),1fr)); gap:.65rem; } .strategy { height:100%; text-align:left; display:flex; flex-direction:column; gap:.35rem; padding:.75rem .8rem; } .strategy[aria-pressed='true'] { border-color:var(--cyan); background:color-mix(in srgb,var(--cyan) 13%,transparent); } .strategy b { font-family:var(--display); font-size:1rem; } .strategy span { color:var(--muted); font: .7rem/1.4 var(--sans); } .sliders { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1rem; } .rng { display:flex; flex-direction:column; gap:.25rem; color:var(--muted); font: .72rem/1.3 var(--mono); } .rng b { color:var(--cyan); } .rng[data-disabled='true'] { opacity:.4; } input[type=range] { accent-color:var(--cyan); width:100%; }
-.preview { background:#070b16; border:1px solid var(--line); border-radius:12px; padding:.65rem; max-height:44vh; overflow:auto; font-family:var(--mono); font-size:.72rem; } .empty { color:var(--muted); padding:.35rem; } .chunk,.record { border-bottom:1px solid var(--line); padding:.6rem .2rem; } .chunk:last-child,.record:last-child { border:0; } .chunk-meta { display:flex; gap:.65rem; flex-wrap:wrap; color:var(--cyan); font-size:.65rem; margin-bottom:.3rem; } .chunk-text { color:#d3ddf2; white-space:pre-wrap; overflow-wrap:anywhere; } .record-id { color:var(--amber); font-size:.66rem; } .record-vec { color:var(--violet); font-size:.66rem; margin-top:.35rem; } details { color:var(--muted); font-size:.66rem; margin-top:.35rem; } summary { cursor:pointer; } pre { white-space:pre-wrap; overflow-wrap:anywhere; margin-top:.3rem; }
-.stats { display:flex; flex-wrap:wrap; gap:1.2rem; font: .71rem/1.3 var(--mono); } .stats div { display:flex; flex-direction:column; } .stats b { color:var(--cyan); font-size:1.08rem; } .stats span { color:var(--muted); font-size:.64rem; } .callout { --c:var(--cyan); border:1px solid color-mix(in srgb,var(--c) 34%,transparent); background:color-mix(in srgb,var(--c) 8%,transparent); border-radius:10px; padding:.6rem .8rem; font-size:.78rem; } .callout.warn { --c:var(--amber); } .callout.err { --c:var(--pink); } .callout.ok { --c:var(--green); } .callout[hidden] { display:none; } .bar { height:8px; overflow:hidden; border-radius:4px; background:var(--panel2); } .bar i { display:block; height:100%; width:0; background:linear-gradient(90deg,var(--violet),var(--cyan)); transition:width .2s ease; }
-@media (max-width:620px) { body { padding:1rem; } .pipeline { padding-left:1.15rem; } .rail { left:5px; } .step::before { left:-1.58rem; } .sliders { grid-template-columns:1fr; } .step-state { width:100%; margin-left:0; } }
-@media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation-duration:.01ms !important; transition-duration:.01ms !important; scroll-behavior:auto !important; } }
+/* Teaching console styles, derived from the workshop deck.
+ *
+ * Font families are named but never fetched: the talk is presented offline, so
+ * each stack falls back to system faces rather than loading a webfont. If the
+ * presenter's machine has Bricolage Grotesque and Chivo installed the console
+ * matches the slides exactly; if not, it still reads correctly.
+ */
+
+/* ---------------------------------------------------------------------------
+ * Design tokens, taken from the deck's palette
+ * ------------------------------------------------------------------------ */
+:root {
+  --bg: #0a0f1e;
+  --panel: rgba(255, 255, 255, .045);
+  --panel2: rgba(255, 255, 255, .075);
+  --ink: #e9eef9;
+  --muted: #94a3c4;
+
+  /* Each accent carries a fixed meaning across the whole console, so colour is
+   * never decorative: cyan is "active / this is the live value", amber is
+   * "attention, something changed or was removed", pink is failure, violet
+   * marks vector data, green is success. */
+  --cyan: #38e0cf;
+  --amber: #ffb547;
+  --pink: #ff5c8a;
+  --violet: #8b7cff;
+  --green: #5ddb8b;
+
+  --line: rgba(255, 255, 255, .11);
+  --r: 14px;
+
+  --sans: 'Chivo', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --display: 'Bricolage Grotesque', 'Chivo', ui-sans-serif, system-ui, sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+/* ---------------------------------------------------------------------------
+ * Reset and base typography
+ * ------------------------------------------------------------------------ */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+/* The frontend shows and hides panels by toggling the `hidden` attribute.
+ * Several rules below set `display` on those same elements, which would
+ * otherwise beat the browser's default [hidden] styling and leave a "hidden"
+ * panel on screen. !important settles it once, globally. */
+[hidden] {
+  display: none !important;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  -webkit-font-smoothing: antialiased;
+  line-height: 1.5;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: clamp(1rem, 3vw, 2.8rem);
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--display);
+  letter-spacing: -.03em;
+}
+
+h1 {
+  font-size: clamp(2rem, 5vw, 3.6rem);
+  font-weight: 800;
+  line-height: .98;
+  max-width: 14ch;
+}
+
+h2 {
+  font-size: clamp(1.1rem, 2vw, 1.45rem);
+  font-weight: 700;
+}
+
+/* ---------------------------------------------------------------------------
+ * Controls
+ * ------------------------------------------------------------------------ */
+button,
+input {
+  font: inherit;
+}
+
+button {
+  font-family: var(--mono);
+  font-size: .75rem;
+  background: var(--panel2);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: .5rem .82rem;
+  cursor: pointer;
+  transition: border-color .15s, color .15s, background .15s;
+}
+
+/* :not(:disabled) matters. A locked step's buttons are disabled, and a hover
+ * highlight on a control that cannot be used reads as an invitation. */
+button:hover:not(:disabled) {
+  color: var(--cyan);
+  border-color: var(--cyan);
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: .45;
+}
+
+/* Amber rather than cyan, and offset from the control: the focus ring has to
+ * stay obvious against a cyan-accented button on a projector, where contrast
+ * is far worse than on a laptop screen. */
+button:focus-visible,
+input:focus-visible {
+  outline: 3px solid var(--amber);
+  outline-offset: 3px;
+}
+
+button.pri {
+  background: var(--cyan);
+  border-color: var(--cyan);
+  color: #04121a;
+  font-weight: 800;
+}
+
+button.pri:hover:not(:disabled) {
+  color: #04121a;
+  filter: brightness(1.08);
+}
+
+button.danger:hover:not(:disabled) {
+  border-color: var(--pink);
+  color: var(--pink);
+}
+
+/* ---------------------------------------------------------------------------
+ * Masthead and shared text helpers
+ * ------------------------------------------------------------------------ */
+.masthead {
+  margin: clamp(.5rem, 3vw, 2.5rem) 0 2rem;
+}
+
+.masthead p {
+  color: var(--muted);
+  max-width: 63ch;
+  margin-top: .8rem;
+  font-size: .93rem;
+}
+
+.hl {
+  color: var(--cyan);
+  font-style: normal;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.mono {
+  font-family: var(--mono);
+  font-size: .72rem;
+}
+
+.eyebrow {
+  color: var(--cyan);
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  font: 700 .69rem/1 var(--mono);
+  letter-spacing: .15em;
+  text-transform: uppercase;
+  margin-bottom: .8rem;
+}
+
+/* A trailing rule that fades out rather than stopping hard. */
+.eyebrow::after {
+  content: '';
+  height: 1px;
+  flex: 1;
+  max-width: 15rem;
+  background: linear-gradient(90deg, var(--line), transparent);
+}
+
+/* ---------------------------------------------------------------------------
+ * The step rail
+ *
+ * The five steps sit against a vertical rail with one node each, so the
+ * pipeline reads as a single sequence rather than five separate cards. Locked
+ * steps stay visible but dimmed and desaturated: the room should be able to
+ * see what is coming next, and that it is not reachable yet.
+ * ------------------------------------------------------------------------ */
+.pipeline {
+  position: relative;
+  padding-left: clamp(0rem, 3vw, 2.3rem);
+}
+
+.rail {
+  position: absolute;
+  left: 7px;
+  top: 1.4rem;
+  bottom: 2rem;
+  width: 1px;
+  background: linear-gradient(var(--cyan), var(--violet) 55%, var(--line));
+}
+
+.step {
+  position: relative;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--panel);
+  padding: clamp(1rem, 2.5vw, 1.55rem);
+  margin-bottom: 1.1rem;
+  transition: opacity .25s, border-color .25s, transform .25s;
+}
+
+/* The rail node. Its offset repeats .pipeline's padding expression so the node
+ * lands on the rail at every viewport width the clamp can produce. */
+.step::before {
+  content: '';
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--bg);
+  border-radius: 50%;
+  background: var(--cyan);
+  left: calc(clamp(0rem, 3vw, 2.3rem) * -1 - 5px);
+  top: 1.72rem;
+  box-shadow: 0 0 0 1px var(--cyan);
+}
+
+/* Server-driven: app.js writes these two attributes from the session's
+ * unlocked_step. Styling from data attributes rather than classes keeps the
+ * state in one place and makes it readable in devtools. */
+.step[data-locked='true'] {
+  opacity: .36;
+  filter: saturate(.55);
+}
+
+.step[data-active='true'] {
+  border-color: color-mix(in srgb, var(--cyan) 52%, transparent);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--cyan) 13%, transparent),
+    0 16px 40px rgba(0, 0, 0, .12);
+}
+
+.step[data-active='true']::before {
+  box-shadow: 0 0 0 1px var(--cyan), 0 0 20px var(--cyan);
+}
+
+.step-head {
+  display: flex;
+  align-items: baseline;
+  gap: .7rem;
+  flex-wrap: wrap;
+}
+
+.step-num,
+.step-state {
+  font: 700 .67rem/1 var(--mono);
+  letter-spacing: .05em;
+}
+
+.step-num {
+  color: var(--cyan);
+  border: 1px solid color-mix(in srgb, var(--cyan) 50%, transparent);
+  padding: .18rem .45rem;
+  border-radius: 999px;
+}
+
+.step-state {
+  color: var(--muted);
+  margin-left: auto;
+  text-transform: uppercase;
+}
+
+.step-body {
+  margin-top: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: .9rem;
+}
+
+/* ---------------------------------------------------------------------------
+ * Step 1: the drop zone
+ * ------------------------------------------------------------------------ */
+.drop {
+  border: 1px dashed color-mix(in srgb, var(--amber) 62%, transparent);
+  background: color-mix(in srgb, var(--amber) 7%, transparent);
+  border-radius: var(--r);
+  padding: 1.35rem;
+  text-align: center;
+  font-size: .86rem;
+}
+
+.drop .muted {
+  margin-top: .45rem;
+}
+
+/* Added while a file is dragged over the zone: amber ("waiting for input")
+ * becomes cyan ("this will accept the drop"). */
+.drop.over {
+  border-color: var(--cyan);
+  background: color-mix(in srgb, var(--cyan) 10%, transparent);
+}
+
+.ctl {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .6rem;
+}
+
+/* ---------------------------------------------------------------------------
+ * Step 2: strategy cards and their sliders
+ * ------------------------------------------------------------------------ */
+.strategies {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
+  gap: .65rem;
+}
+
+.strategy {
+  height: 100%;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: .35rem;
+  padding: .75rem .8rem;
+}
+
+/* Selection is keyed off aria-pressed, so the accessible state and the visible
+ * state cannot disagree -- there is no parallel "selected" class to forget to
+ * update. */
+.strategy[aria-pressed='true'] {
+  border-color: var(--cyan);
+  background: color-mix(in srgb, var(--cyan) 13%, transparent);
+}
+
+.strategy b {
+  font-family: var(--display);
+  font-size: 1rem;
+}
+
+.strategy span {
+  color: var(--muted);
+  font: .7rem/1.4 var(--sans);
+}
+
+.sliders {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.rng {
+  display: flex;
+  flex-direction: column;
+  gap: .25rem;
+  color: var(--muted);
+  font: .72rem/1.3 var(--mono);
+}
+
+.rng b {
+  color: var(--cyan);
+}
+
+/* Semantic chunking ignores size and overlap entirely, so those sliders are
+ * dimmed as well as disabled. A control that silently does nothing would teach
+ * exactly the wrong lesson. */
+.rng[data-disabled='true'] {
+  opacity: .4;
+}
+
+input[type=range] {
+  accent-color: var(--cyan);
+  width: 100%;
+}
+
+/* ---------------------------------------------------------------------------
+ * Steps 3 and 5: the scrollable chunk and record previews
+ * ------------------------------------------------------------------------ */
+
+/* Darker than the panels around it: this is raw data, not chrome. Capped at
+ * 44vh so a 400-chunk document scrolls within its own panel instead of burying
+ * steps 4 and 5 far below the fold. */
+.preview {
+  background: #070b16;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: .65rem;
+  max-height: 44vh;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: .72rem;
+}
+
+.empty {
+  color: var(--muted);
+  padding: .35rem;
+}
+
+.chunk,
+.record {
+  border-bottom: 1px solid var(--line);
+  padding: .6rem .2rem;
+}
+
+.chunk:last-child,
+.record:last-child {
+  border: 0;
+}
+
+.chunk-meta {
+  display: flex;
+  gap: .65rem;
+  flex-wrap: wrap;
+  color: var(--cyan);
+  font-size: .65rem;
+  margin-bottom: .3rem;
+}
+
+/* overflow-wrap: anywhere, because fixed-size splitting breaks mid-word by
+ * design -- the text must stay inside its container while demonstrating
+ * exactly that. pre-wrap keeps the whitespace the splitter actually produced,
+ * which is part of what the room is inspecting. */
+.chunk-text {
+  color: #d3ddf2;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.record-id {
+  color: var(--amber);
+  font-size: .66rem;
+}
+
+/* Violet marks vector data throughout, matching the deck. */
+.record-vec {
+  color: var(--violet);
+  font-size: .66rem;
+  margin-top: .35rem;
+}
+
+details {
+  color: var(--muted);
+  font-size: .66rem;
+  margin-top: .35rem;
+}
+
+summary {
+  cursor: pointer;
+}
+
+pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin-top: .3rem;
+}
+
+/* ---------------------------------------------------------------------------
+ * Statistics, callouts, and the embedding progress bar
+ * ------------------------------------------------------------------------ */
+.stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.2rem;
+  font: .71rem/1.3 var(--mono);
+}
+
+.stats div {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Number above label, the number larger and in cyan: these counts are the
+ * point of step 1, and they get read aloud from across a room. */
+.stats b {
+  color: var(--cyan);
+  font-size: 1.08rem;
+}
+
+.stats span {
+  color: var(--muted);
+  font-size: .64rem;
+}
+
+/* One callout shape, recoloured through --c by a modifier class, so severity
+ * is a single-token change instead of four near-duplicate rules. */
+.callout {
+  --c: var(--cyan);
+  border: 1px solid color-mix(in srgb, var(--c) 34%, transparent);
+  background: color-mix(in srgb, var(--c) 8%, transparent);
+  border-radius: 10px;
+  padding: .6rem .8rem;
+  font-size: .78rem;
+}
+
+.callout.warn { --c: var(--amber); }
+.callout.err  { --c: var(--pink); }
+.callout.ok   { --c: var(--green); }
+
+/* Restates the global [hidden] rule. .callout sets no display of its own
+ * today, but being explicit keeps a later layout change from resurrecting a
+ * hidden error banner. */
+.callout[hidden] {
+  display: none;
+}
+
+.bar {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 4px;
+  background: var(--panel2);
+}
+
+/* Width is driven by real per-batch progress reported by the server. The
+ * transition smooths the step between batches; it never animates ahead of the
+ * work being done. */
+.bar i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, var(--violet), var(--cyan));
+  transition: width .2s ease;
+}
+
+/* ---------------------------------------------------------------------------
+ * Narrow screens
+ * ------------------------------------------------------------------------ */
+@media (max-width: 620px) {
+  body {
+    padding: 1rem;
+  }
+
+  .pipeline {
+    padding-left: 1.15rem;
+  }
+
+  .rail {
+    left: 5px;
+  }
+
+  /* A fixed offset, because .pipeline's padding is no longer the clamped value
+   * the default rule calculates against. */
+  .step::before {
+    left: -1.58rem;
+  }
+
+  .sliders {
+    grid-template-columns: 1fr;
+  }
+
+  /* margin-left: auto would push this off the row once the header wraps. */
+  .step-state {
+    width: 100%;
+    margin-left: 0;
+  }
+}
+
+/* Honour the OS reduced-motion setting. The step transitions and the progress
+ * bar are decoration, and this console is projected to a whole room. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: .01ms !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
