@@ -54,3 +54,6 @@ hf_home/
 # Tooling
 # ---------------------------------------------------------------------------
 .impeccable/
+
+# SDD scratch
+.superpowers/

@@ -2468,6 +2468,7 @@ is far more reliable than parsing a streaming response under test.
 """
 
 import json
+import time
 
 import chromadb
 import pytest
@@ -2600,10 +2601,17 @@ class TestChunkAndEmbed:
             "/api/chunk", json={"strategy": "recursive", "size": 200, "overlap": 20}
         ).json()["job_id"]
 
-        status = client.get(f"/api/status/{job_id}").json()
-        assert status["status"] in {"running", "done"}
-        # TestClient runs background tasks to completion before returning.
-        assert status["status"] == "done"
+        # The route uses a bare asyncio.create_task, which TestClient does NOT
+        # guarantee to drain before returning. Poll until terminal rather than
+        # assuming, so this cannot pass locally and flake in CI.
+        status = None
+        for _ in range(100):
+            status = client.get(f"/api/status/{job_id}").json()
+            if status["status"] != "running":
+                break
+            time.sleep(0.05)
+
+        assert status["status"] == "done", f"job did not finish: {status}"
         assert any(e["type"] == "chunk" for e in status["events"])
         assert any(e["type"] == "done" for e in status["events"])
 
@@ -3303,7 +3311,7 @@ header p { color: var(--muted); max-width: 62ch; margin-top: .6rem; }
 }
 .step[data-locked="true"] {
   opacity: .38;
-  pointer-events: none;   /* belt; the server is the authority (braces) */
+  pointer-events: none;   /* belt and braces; the server is the authority */
 }
 .step[data-active="true"] { border-color: color-mix(in srgb, var(--cyan) 45%, transparent); }
 .step-head { display: flex; align-items: baseline; gap: .75rem; flex-wrap: wrap; }
