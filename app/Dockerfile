@@ -39,6 +39,7 @@ ENV HF_HUB_OFFLINE=1 \
 
 COPY app/ /srv/app/
 COPY tests/ /srv/tests/
+COPY pytest.ini /srv/pytest.ini
 
 EXPOSE 8080
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
