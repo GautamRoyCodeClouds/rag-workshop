@@ -113,16 +113,28 @@ class LoadResult:
         *start* offset: that keeps splitters free to cross boundaries (recursive
         and semantic must) while still giving every chunk something citable.
         """
-        if not self.page_offsets:
-            return 1
-        starts = [start for start, _ in self.page_offsets]
-        # bisect_right, not bisect_left: an offset equal to a page's recorded
-        # start must resolve to *that* page, not the one before it. bisect_left
-        # would put the insertion point before equal entries, and subtracting 1
-        # would then land one page too early for any offset sitting exactly on
-        # a boundary.
-        index = max(bisect.bisect_right(starts, offset) - 1, 0)
-        return self.page_offsets[index][1]
+        return page_for_offset(self.page_offsets, offset)
+
+
+def page_for_offset(page_offsets: list[tuple[int, int]], offset: int) -> int:
+    """Which page does a character offset fall on, given (start, page) pairs?
+
+    Module-level, not just a LoadResult method: SessionState (app/session.py)
+    needs the identical lookup after a JSON round-trip, once the LoadResult
+    object itself no longer exists. This exact function has already been the
+    source of three separate bugs in this project, so it gets one home rather
+    than two copies free to drift apart.
+    """
+    if not page_offsets:
+        return 1
+    starts = [start for start, _ in page_offsets]
+    # bisect_right, not bisect_left: an offset equal to a page's recorded
+    # start must resolve to *that* page, not the one before it. bisect_left
+    # would put the insertion point before equal entries, and subtracting 1
+    # would then land one page too early for any offset sitting exactly on
+    # a boundary.
+    index = max(bisect.bisect_right(starts, offset) - 1, 0)
+    return page_offsets[index][1]
 
 
 def _find_boilerplate(pages: list[str]) -> set[str]:
