@@ -90,3 +90,87 @@ Jobs are in-process by design, so a server restart abandons in-flight jobs;
 session state remains persisted and the client can restart the affected step.
 This is the intentionally small scope selected for the one-document workshop
 demo, not a distributed task queue.
+
+---
+
+## Fix round 1/5 — resumability, ownership, and async boundaries
+
+### Findings fixed
+
+- **SSE/poll cursor contract:** every retained event receives a monotonically
+  increasing `id`. SSE frames include a standard `id:` line when an id exists,
+  while `sse_format({"type": "done"})` remains the original data-only frame.
+  `Last-Event-ID` (or the `after` query cursor) replays only unseen SSE events;
+  `/api/status/{job_id}?after=N` returns only later events and the current
+  `cursor`.
+- **Atomic polling snapshots:** `JobRegistry.snapshot()` reads terminal status,
+  error, cursor, completion session view, and filtered events under one lock.
+  `finish()` adds its terminal event inside that same lock, so a terminal
+  snapshot always contains the terminal event.
+- **Stale job ownership:** jobs carry a per-session in-process generation.
+  Upload, local load, chunk start, embed start, and reset invalidate the old
+  generation and cancel retained job tasks. An ownership check immediately
+  before session mutation prevents a cancelled `to_thread` worker from
+  resurrecting reset or newer-document state after its thread returns.
+- **Task lifecycle:** registry stores each created task, consumes exceptions,
+  cancels invalidated jobs, and FastAPI's lifespan drains active jobs on
+  shutdown. The application uses a lifespan handler rather than deprecated
+  `on_event` hooks.
+- **Event-loop boundaries:** PDF parsing, Chroma collection lookup, record
+  reading, requested collection drop, and existing embedding/vector work all
+  run through `asyncio.to_thread`.
+- **Server authority after completion:** chunk and embed summary events include
+  `unlocked_step`; terminal job snapshots return the saved server session view.
+
+### Regression tests
+
+`tests/test_api.py` now proves:
+
+- live subscription/reconnect replays only ids after the supplied cursor;
+- switching from a partially consumed SSE stream to polling does not duplicate
+  an event;
+- a terminal snapshot includes its terminal event;
+- a delayed chunk worker cannot restore state after reset or overwrite a newer
+  upload;
+- PDF parsing and collection lookup leave the event loop responsive while the
+  worker is blocked;
+- local-load cookie persistence is exercised by a subsequent cookie-backed
+  request;
+- embedding emits two genuine progress callbacks and returns completion unlock
+  state.
+
+### RED/GREEN evidence
+
+After writing the new regression tests, they were run against the unmodified
+`c60c367` production implementation in Docker Python 3.12:
+
+```text
+docker compose run --rm app pytest tests/test_api.py -v
+11 failed, 25 passed
+```
+
+The failures directly showed missing completion `session`, SSE `id:` frames and
+cursor filtering, `subscribe(after=...)`/`snapshot`, stale-session resurrection
+after reset/new upload, and synchronous `_ingest_path`/`_collection` behavior.
+
+After the implementation:
+
+```text
+docker compose run --rm app pytest tests/test_api.py -v
+36 passed, 16 warnings
+
+docker compose run --rm app pytest -m 'not slow' -v
+148 passed, 2 deselected, 219 warnings
+```
+
+Warnings remain dependency/test-client noise: 218 Chroma/Pydantic
+`model_fields` deprecations across the full suite and one Starlette
+per-request-cookie deprecation. No application failures remain.
+
+### Minor concern
+
+Completed jobs intentionally retain history for reconnect/polling and are not
+evicted yet. This remains appropriate for the single-document workshop process,
+but a long-lived multi-user deployment would need TTL/size-based job eviction.
+The required `Job.queue` remains available for the public interface; production
+SSE uses per-subscriber queues so it does not duplicate replay frames.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import chromadb
@@ -24,7 +25,14 @@ from app.session import store
 BASE_DIR = Path(__file__).parent
 SESSION_COOKIE = "rag_session"
 
-app = FastAPI(title="RAG Ingestion Pipeline", docs_url="/api/docs")
+
+@asynccontextmanager
+async def lifespan(_app):
+    yield
+    await registry.shutdown()
+
+
+app = FastAPI(title="RAG Ingestion Pipeline", docs_url="/api/docs", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
@@ -59,9 +67,9 @@ def _json_response(body: dict, status_code: int = 200) -> Response:
     return Response(content=json.dumps(body), media_type="application/json", status_code=status_code)
 
 
-def _collection():
+async def _collection():
     try:
-        return vector_store.get_collection(get_client())
+        return await asyncio.to_thread(lambda: vector_store.get_collection(get_client()))
     except Exception as exc:  # noqa: BLE001 - displayed as a retryable UI error
         raise HTTPException(
             status_code=503,
@@ -127,9 +135,9 @@ def health() -> dict:
     }
 
 
-def _ingest_path(state, path: Path, display_name: str) -> dict:
+async def _ingest_path(state, path: Path, display_name: str) -> dict:
     try:
-        result = load_pdf(path)
+        result = await asyncio.to_thread(load_pdf, path)
     except EmptyDocumentError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 - invalid/encrypted PDFs are client errors
@@ -166,22 +174,24 @@ async def upload(request: Request, file: UploadFile = File(...)) -> Response:
             status_code=400,
             detail=f"File is too large: {len(payload) / 1_048_576:.1f} MB exceeds the {settings.max_upload_mb} MB limit.",
         )
+    registry.invalidate_session(state.session_id)
     uploads = Path(settings.data_dir) / "uploads" / state.session_id
     uploads.mkdir(parents=True, exist_ok=True)
     target = uploads / "source.pdf"
     target.write_bytes(payload)
-    response = _json_response(_ingest_path(state, target, file.filename or "document.pdf"))
+    response = _json_response(await _ingest_path(state, target, file.filename or "document.pdf"))
     _with_session_cookie(response, state.session_id)
     return response
 
 
 @app.post("/api/use-local")
-def use_local(request: Request) -> Response:
+async def use_local(request: Request) -> Response:
     local = settings.local_pdf
     if local is None:
         raise HTTPException(status_code=404, detail="No local document is configured.")
     state = _session(request)
-    response = _json_response(_ingest_path(state, local, local.name))
+    registry.invalidate_session(state.session_id)
+    response = _json_response(await _ingest_path(state, local, local.name))
     _with_session_cookie(response, state.session_id)
     return response
 
@@ -214,7 +224,8 @@ async def start_chunking(request: Request) -> Response:
         percentile = int(body.get("percentile", settings.semantic_percentile))
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail="Chunk settings must be integers.") from exc
-    job = registry.create()
+    registry.invalidate_session(state.session_id)
+    job = registry.create(state.session_id)
 
     async def run() -> None:
         try:
@@ -242,6 +253,8 @@ async def start_chunking(request: Request) -> Response:
                     "page": state.page_for_offset(piece.start),
                     "parent_id": piece.parent_id,
                 })
+            if not registry.is_current(job):
+                return
             state.chunks = result.chunks
             state.chunking = {
                 "strategy": strategy,
@@ -260,14 +273,15 @@ async def start_chunking(request: Request) -> Response:
                 "chunk_count": len(result.chunks),
                 "sections_detected": result.sections_detected,
                 "fell_back": result.fell_back,
+                "unlocked_step": state.unlocked_step(),
             })
-            registry.finish(job, "done")
+            registry.finish(job, "done", session=state.to_json())
         except UnknownStrategyError as exc:
             registry.finish(job, "error", str(exc))
         except Exception as exc:  # noqa: BLE001 - delivered to the job UI
             registry.finish(job, "error", f"{type(exc).__name__}: {exc}")
 
-    asyncio.create_task(run())
+    registry.register_task(job, asyncio.create_task(run()))
     response = _json_response({"job_id": job.job_id}, status_code=202)
     _with_session_cookie(response, state.session_id)
     return response
@@ -278,8 +292,9 @@ async def start_embedding(request: Request) -> Response:
     state = _session(request)
     if not state.chunks:
         raise HTTPException(status_code=409, detail="Chunk the document first.")
-    collection = _collection()
-    job = registry.create()
+    registry.invalidate_session(state.session_id)
+    collection = await _collection()
+    job = registry.create(state.session_id)
 
     async def run() -> None:
         try:
@@ -305,27 +320,45 @@ async def start_embedding(request: Request) -> Response:
                 embed_model=settings.embed_model,
                 page_for_offset=state.page_for_offset,
             )
+            if not registry.is_current(job):
+                return
             state.embedding = {"model": settings.embed_model, "dims": settings.embed_dims, "vectors_written": written}
             store.save(state)
-            registry.publish(job, {"type": "summary", "vectors_written": written})
-            registry.finish(job, "done")
+            registry.publish(job, {
+                "type": "summary",
+                "vectors_written": written,
+                "unlocked_step": state.unlocked_step(),
+            })
+            registry.finish(job, "done", session=state.to_json())
         except Exception as exc:  # noqa: BLE001 - delivered to the job UI
             registry.finish(job, "error", f"{type(exc).__name__}: {exc}")
 
-    asyncio.create_task(run())
+    registry.register_task(job, asyncio.create_task(run()))
     response = _json_response({"job_id": job.job_id}, status_code=202)
     _with_session_cookie(response, state.session_id)
     return response
 
 
+def _cursor(value: str | int | None) -> int:
+    try:
+        cursor = int(value or 0)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Event cursor must be a non-negative integer.") from exc
+    if cursor < 0:
+        raise HTTPException(status_code=400, detail="Event cursor must be a non-negative integer.")
+    return cursor
+
+
 @app.get("/api/events/{job_id}")
-async def events(job_id: str):
+async def events(job_id: str, request: Request, after: int | None = None):
     job = registry.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Unknown job.")
 
+    cursor = _cursor(request.headers.get("last-event-id") if request.headers.get("last-event-id") is not None else after)
+
     async def stream():
-        history, queue, terminal = registry.subscribe(job)
+        history, queue, terminal = registry.subscribe(job, after=cursor)
         try:
             for event in history:
                 yield sse_format(event)
@@ -345,25 +378,27 @@ async def events(job_id: str):
 
 
 @app.get("/api/status/{job_id}")
-def job_status(job_id: str) -> dict:
+def job_status(job_id: str, after: int = 0) -> dict:
     job = registry.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Unknown job.")
-    return {"job_id": job.job_id, "status": job.status, "error": job.error, "events": list(job.events)}
+    return registry.snapshot(job, after=_cursor(after))
 
 
 @app.get("/api/collection")
-def collection_records(offset: int = 0, limit: int = 25) -> dict:
-    return vector_store.read_records(_collection(), offset=offset, limit=min(limit, 100))
+async def collection_records(offset: int = 0, limit: int = 25) -> dict:
+    collection = await _collection()
+    return await asyncio.to_thread(vector_store.read_records, collection, offset=offset, limit=min(limit, 100))
 
 
 @app.post("/api/reset")
 async def reset(request: Request) -> Response:
     state = _session(request)
     body = await _request_body(request)
+    registry.invalidate_session(state.session_id)
     if body.get("drop_collection"):
         try:
-            vector_store.drop_collection(get_client())
+            await asyncio.to_thread(lambda: vector_store.drop_collection(get_client()))
         except Exception as exc:  # noqa: BLE001 - unavailable store must stay visible
             raise HTTPException(status_code=503, detail=f"ChromaDB collection reset failed ({type(exc).__name__}).") from exc
     fresh = store.reset(state.session_id)

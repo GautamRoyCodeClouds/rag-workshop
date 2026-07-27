@@ -1,4 +1,4 @@
-"""Thread-safe background-job progress and SSE subscriptions."""
+"""In-process job state, resumable SSE events, and task lifecycle ownership."""
 
 from __future__ import annotations
 
@@ -16,36 +16,39 @@ class Job:
     status: str = "running"
     events: list[dict] = field(default_factory=list)
     error: str = ""
+    session_id: str = ""
+    generation: int = 0
+    cursor: int = 0
+    session: dict | None = None
+    task: asyncio.Task | None = field(default=None, repr=False)
 
 
 def sse_format(event: dict) -> str:
-    """Render one event as a Server-Sent Events frame."""
-    return f"data: {json.dumps(event)}\n\n"
+    """Render an event as SSE, retaining the old no-cursor frame contract."""
+    data = f"data: {json.dumps(event)}\n\n"
+    return f"id: {event['id']}\n{data}" if "id" in event else data
 
 
 class JobRegistry:
-    """Track jobs, their polling history, and exact-once SSE subscriptions.
-
-    Pipeline functions run in worker threads.  Queue operations therefore always
-    hop back to the job's owning event loop; neither asyncio.Queue nor a list
-    append is used as a cross-thread synchronisation primitive.
-    """
+    """Own job history, exact-once subscribers, and in-process task handles."""
 
     def __init__(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
         self._jobs: dict[str, Job] = {}
         self._loops: dict[str, asyncio.AbstractEventLoop | None] = {}
         self._subscribers: dict[str, list[asyncio.Queue[dict | None]]] = {}
+        self._generations: dict[str, int] = {}
         self._lock = threading.RLock()
         self._default_loop = loop
         self._owner_thread = threading.get_ident()
 
-    def create(self) -> Job:
+    def create(self, session_id: str = "") -> Job:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = self._default_loop
-        job = Job(job_id=uuid.uuid4().hex)
         with self._lock:
+            generation = self._generations.get(session_id, 0)
+            job = Job(job_id=uuid.uuid4().hex, session_id=session_id, generation=generation)
             self._jobs[job.job_id] = job
             self._loops[job.job_id] = loop
             self._subscribers[job.job_id] = []
@@ -56,7 +59,6 @@ class JobRegistry:
             return self._jobs.get(job_id)
 
     def _enqueue(self, job: Job, item: dict | None, queues: list[asyncio.Queue]) -> None:
-        """Schedule a queue write on the owning loop, never from a worker."""
         loop = self._loops[job.job_id]
         if loop is not None and not loop.is_closed():
             for queue in queues:
@@ -67,36 +69,49 @@ class JobRegistry:
         for queue in queues:
             queue.put_nowait(item)
 
-    def _publish_locked(self, job: Job, event: dict) -> None:
-        job.events.append(event)
-        self._enqueue(job, event, [job.queue, *self._subscribers[job.job_id]])
+    def _publish_locked(self, job: Job, event: dict) -> dict:
+        job.cursor += 1
+        recorded = {**event, "id": job.cursor}
+        job.events.append(recorded)
+        self._enqueue(job, recorded, [job.queue, *self._subscribers[job.job_id]])
+        return recorded
 
     def publish(self, job: Job, event: dict) -> None:
-        """Atomically retain and publish a progress event from any thread."""
+        """Append a cursor-bearing event and safely notify all live consumers."""
         with self._lock:
             self._publish_locked(job, event)
 
-    def finish(self, job: Job, status: str, error: str = "") -> None:
-        """Mark a job terminal, publish its terminal event, and close streams."""
+    def finish(self, job: Job, status: str, error: str = "", session: dict | None = None) -> None:
+        """Atomically make a job terminal and pair status with its terminal event."""
         with self._lock:
+            if job.status != "running":
+                return
             job.status = status
             job.error = error
+            job.session = dict(session) if session is not None else job.session
             event = {"type": status}
             if error:
                 event["error"] = error
             self._publish_locked(job, event)
             self._enqueue(job, None, [job.queue, *self._subscribers[job.job_id]])
 
-    def subscribe(self, job: Job) -> tuple[list[dict], asyncio.Queue[dict | None], bool]:
-        """Atomically snapshot history and subscribe to future events.
+    def snapshot(self, job: Job, after: int = 0) -> dict:
+        """Read status, error, cursor, and unseen events under one lock."""
+        with self._lock:
+            return {
+                "job_id": job.job_id,
+                "status": job.status,
+                "error": job.error,
+                "cursor": job.cursor,
+                "events": [dict(event) for event in job.events if event["id"] > after],
+                "session": dict(job.session) if job.session is not None else None,
+            }
 
-        The returned replay and queue form a hand-off boundary: events before
-        the lock are in replay; every later event goes only to this subscriber.
-        This avoids duplicate late-SSE frames from the job's polling queue.
-        """
+    def subscribe(self, job: Job, after: int = 0) -> tuple[list[dict], asyncio.Queue[dict | None], bool]:
+        """Atomically replay only unseen history and subscribe for later events."""
         queue: asyncio.Queue[dict | None] = asyncio.Queue()
         with self._lock:
-            history = list(job.events)
+            history = [dict(event) for event in job.events if event["id"] > after]
             terminal = job.status != "running"
             if not terminal:
                 self._subscribers[job.job_id].append(queue)
@@ -107,6 +122,49 @@ class JobRegistry:
             subscribers = self._subscribers.get(job.job_id, [])
             if queue in subscribers:
                 subscribers.remove(queue)
+
+    def register_task(self, job: Job, task: asyncio.Task) -> None:
+        """Retain a handle so invalidation and application shutdown can drain it."""
+        with self._lock:
+            job.task = task
+
+        def consume(done: asyncio.Task) -> None:
+            if not done.cancelled():
+                done.exception()
+            with self._lock:
+                if job.task is done:
+                    job.task = None
+
+        task.add_done_callback(consume)
+
+    def is_current(self, job: Job) -> bool:
+        with self._lock:
+            return job.status == "running" and job.generation == self._generations.get(job.session_id, 0)
+
+    def invalidate_session(self, session_id: str) -> None:
+        """Cancel every current session job; thread work later fails ownership checks."""
+        with self._lock:
+            self._generations[session_id] = self._generations.get(session_id, 0) + 1
+            jobs = [job for job in self._jobs.values() if job.session_id == session_id and job.status == "running"]
+            for job in jobs:
+                self.finish(job, "cancelled", "Superseded by a newer session action.")
+            tasks = [(job.task, self._loops[job.job_id]) for job in jobs if job.task is not None]
+        for task, loop in tasks:
+            if loop is not None and not loop.is_closed():
+                loop.call_soon_threadsafe(task.cancel)
+            else:
+                task.cancel()
+
+    async def shutdown(self) -> None:
+        """Cancel and await active jobs during FastAPI lifespan shutdown."""
+        with self._lock:
+            session_ids = {job.session_id for job in self._jobs.values() if job.status == "running"}
+        for session_id in session_ids:
+            self.invalidate_session(session_id)
+        with self._lock:
+            tasks = [job.task for job in self._jobs.values() if job.task is not None]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 registry = JobRegistry()

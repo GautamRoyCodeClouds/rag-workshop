@@ -29,6 +29,7 @@ def isolated_state(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(main_module, "settings", isolated_settings)
     monkeypatch.setattr(main_module.vector_store, "settings", isolated_settings)
+    monkeypatch.setattr(main_module, "registry", JobRegistry())
     yield
 
 
@@ -125,6 +126,10 @@ class TestUpload:
         response = client.post("/api/use-local")
         assert response.status_code == 200
         assert "rag_session=" in response.headers["set-cookie"]
+        # TestClient keeps the issued cookie; a later server-rendered page must
+        # rehydrate the document rather than silently beginning a new session.
+        assert client.get("/").status_code == 200
+        assert main_module.store.get_or_create(client.cookies["rag_session"]).upload["filename"] == structured_pdf.split("/")[-1]
 
     def test_malformed_session_cookie_becomes_400_and_is_replaced(self, client):
         response = client.get("/", cookies={"rag_session": "../../bad"})
@@ -175,6 +180,7 @@ class TestChunkAndEmbed:
         assert status["status"] == "done", f"job did not finish: {status}"
         assert any(event["type"] == "chunk" for event in status["events"])
         assert any(event["type"] == "done" for event in status["events"])
+        assert status["session"]["unlocked_step"] == 4
 
     def test_embedding_requires_chunking_first(self, client, structured_pdf):
         self.upload(client, structured_pdf)
@@ -186,15 +192,20 @@ class TestChunkAndEmbed:
 
         self.upload(client, structured_pdf)
         state = main_module.store.get_or_create(client.cookies.get("rag_session"))
-        state.chunks = [Chunk(index=0, text="A chunk", start=0, strategy="recursive")]
+        state.chunks = [
+            Chunk(index=0, text="First chunk", start=0, strategy="recursive"),
+            Chunk(index=1, text="Second chunk", start=12, strategy="recursive"),
+        ]
         state.chunking = {"size": 200, "overlap": 20}
         main_module.store.save(state)
+        monkeypatch.setattr(main_module, "settings", replace(main_module.settings, embed_batch_size=1))
 
         monkeypatch.setattr(main_module, "build_embeddings", lambda: object())
 
         def fake_embed(_model, _texts, _batch_size, progress):
-            progress(1, 1)
-            return [[1.0] + [0.0] * 383]
+            progress(1, 2)
+            progress(2, 2)
+            return [[1.0] + [0.0] * 383, [0.0, 1.0] + [0.0] * 382]
 
         monkeypatch.setattr(main_module, "embed_batched", fake_embed)
         response = client.post("/api/embed")
@@ -206,7 +217,9 @@ class TestChunkAndEmbed:
                 break
             time.sleep(0.02)
         assert status["status"] == "done"
-        assert {"type": "embedded", "done": 1, "total": 1} in status["events"]
+        progress = [event for event in status["events"] if event["type"] == "embedded"]
+        assert [(event["done"], event["total"]) for event in progress] == [(1, 2), (2, 2)]
+        assert status["session"]["unlocked_step"] == 5
 
     def test_status_for_an_unknown_job_is_404(self, client):
         assert client.get("/api/status/nope").status_code == 404
@@ -245,13 +258,16 @@ class TestSseFormatting:
         raw = sse_format({"type": "chunk", "index": 3})
         assert json.loads(raw.removeprefix("data: ").strip())["index"] == 3
 
+    def test_event_id_is_rendered_as_an_sse_cursor(self):
+        assert sse_format({"id": 7, "type": "chunk"}).startswith("id: 7\ndata: ")
+
 
 class TestJobRegistry:
     def test_publish_records_events_for_the_polling_fallback(self):
         registry = JobRegistry()
         job = registry.create()
         registry.publish(job, {"type": "chunk", "index": 0})
-        assert job.events == [{"type": "chunk", "index": 0}]
+        assert job.events == [{"id": 1, "type": "chunk", "index": 0}]
 
     def test_finish_sets_the_terminal_status(self):
         registry = JobRegistry()
@@ -273,10 +289,10 @@ class TestJobRegistry:
             thread.start()
             event = await asyncio.wait_for(job.queue.get(), timeout=1)
             thread.join()
-            assert job.events == [{"type": "chunk", "index": 1}]
+            assert job.events == [{"id": 1, "type": "chunk", "index": 1}]
             return [event]
 
-        assert asyncio.run(consume()) == [{"type": "chunk", "index": 1}]
+        assert asyncio.run(consume()) == [{"id": 1, "type": "chunk", "index": 1}]
 
     def test_late_sse_subscriber_replays_each_event_exactly_once(self, client):
         job = main_module.registry.create()
@@ -285,4 +301,128 @@ class TestJobRegistry:
         response = client.get(f"/api/events/{job.job_id}")
         frames = [line for line in response.text.splitlines() if line.startswith("data: ")]
         payloads = [json.loads(frame.removeprefix("data: ")) for frame in frames]
-        assert payloads == [{"type": "stage", "message": "already here"}, {"type": "done"}]
+        assert [payload["type"] for payload in payloads] == ["stage", "done"]
+        assert [payload["id"] for payload in payloads] == [1, 2]
+
+    def test_live_reconnect_replays_only_events_after_the_cursor(self):
+        async def reconnect() -> None:
+            registry = JobRegistry(loop=asyncio.get_running_loop())
+            job = registry.create()
+            registry.publish(job, {"type": "stage"})
+            history, queue, terminal = registry.subscribe(job, after=0)
+            assert terminal is False
+            assert [event["id"] for event in history] == [1]
+            registry.publish(job, {"type": "chunk"})
+            assert (await queue.get())["id"] == 2
+            registry.unsubscribe(job, queue)
+            registry.publish(job, {"type": "summary"})
+            replay, _queue, terminal = registry.subscribe(job, after=2)
+            assert terminal is False
+            assert [event["id"] for event in replay] == [3]
+
+        asyncio.run(reconnect())
+
+    def test_polling_after_an_sse_cursor_has_no_duplicate_events(self, client):
+        job = main_module.registry.create()
+        main_module.registry.publish(job, {"type": "stage"})
+        main_module.registry.publish(job, {"type": "chunk"})
+        main_module.registry.finish(job, "done")
+        sse = client.get(f"/api/events/{job.job_id}", headers={"Last-Event-ID": "1"})
+        seen = [
+            json.loads(line.removeprefix("data: "))["id"]
+            for line in sse.text.splitlines()
+            if line.startswith("data: ")
+        ]
+        polling = client.get(f"/api/status/{job.job_id}?after=2").json()
+        assert seen == [2, 3]
+        assert [event["id"] for event in polling["events"]] == [3]
+        assert polling["cursor"] == 3
+
+    def test_terminal_snapshot_contains_the_terminal_event(self):
+        registry = JobRegistry()
+        job = registry.create()
+        registry.finish(job, "done")
+        snapshot = registry.snapshot(job)
+        assert snapshot["status"] == "done"
+        assert snapshot["events"][-1]["type"] == "done"
+
+
+class TestJobOwnershipAndAsyncBoundaries:
+    def test_delayed_chunk_cannot_resurrect_a_reset_session(self, client, structured_pdf, monkeypatch):
+        from app.pipeline.chunkers import Chunk, ChunkResult
+
+        with open(structured_pdf, "rb") as handle:
+            client.post("/api/upload", files={"file": ("old.pdf", handle.read(), "application/pdf")})
+        started, release = threading.Event(), threading.Event()
+
+        def delayed_chunk(*_args, **_kwargs):
+            started.set()
+            assert release.wait(1)
+            return ChunkResult(chunks=[Chunk(0, "old", 0, "recursive")], strategy="recursive")
+
+        monkeypatch.setattr(main_module, "chunk", delayed_chunk)
+        client.post("/api/chunk", json={"strategy": "recursive"})
+        assert started.wait(1)
+        assert client.post("/api/reset", json={}).status_code == 200
+        release.set()
+        time.sleep(0.05)
+        state = main_module.store.get_or_create(client.cookies["rag_session"])
+        assert state.upload is None
+        assert state.chunking is None
+
+    def test_delayed_chunk_cannot_overwrite_a_new_document(self, client, structured_pdf, flat_pdf, monkeypatch):
+        from app.pipeline.chunkers import Chunk, ChunkResult
+
+        with open(structured_pdf, "rb") as handle:
+            client.post("/api/upload", files={"file": ("old.pdf", handle.read(), "application/pdf")})
+        started, release = threading.Event(), threading.Event()
+
+        def delayed_chunk(*_args, **_kwargs):
+            started.set()
+            assert release.wait(1)
+            return ChunkResult(chunks=[Chunk(0, "old", 0, "recursive")], strategy="recursive")
+
+        monkeypatch.setattr(main_module, "chunk", delayed_chunk)
+        client.post("/api/chunk", json={"strategy": "recursive"})
+        assert started.wait(1)
+        with open(flat_pdf, "rb") as handle:
+            client.post("/api/upload", files={"file": ("new.pdf", handle.read(), "application/pdf")})
+        release.set()
+        time.sleep(0.05)
+        state = main_module.store.get_or_create(client.cookies["rag_session"])
+        assert state.upload["filename"] == "new.pdf"
+        assert state.chunking is None
+
+    def test_pdf_parse_runs_without_blocking_the_event_loop(self, monkeypatch, tmp_path):
+        from app.pipeline.loader import LoadResult
+
+        release = threading.Event()
+        result = LoadResult("text", 1, 4, 0, 0, 0, "doc", [(0, 1)])
+        monkeypatch.setattr(main_module, "load_pdf", lambda _path: (release.wait(0.5), result)[1])
+        state = main_module.store.get_or_create(None)
+
+        async def run() -> None:
+            asyncio.get_running_loop().call_later(0.02, release.set)
+            task = asyncio.create_task(main_module._ingest_path(state, tmp_path / "source.pdf", "x.pdf"))
+            await asyncio.sleep(0.005)
+            assert not task.done()
+            await task
+
+        asyncio.run(run())
+
+    def test_collection_lookup_runs_without_blocking_the_event_loop(self, monkeypatch):
+        release = threading.Event()
+        monkeypatch.setattr(
+            main_module.vector_store,
+            "get_collection",
+            lambda _client: (release.wait(0.5), object())[1],
+        )
+
+        async def run() -> None:
+            asyncio.get_running_loop().call_later(0.02, release.set)
+            task = asyncio.create_task(main_module._collection())
+            await asyncio.sleep(0.005)
+            assert not task.done()
+            await task
+
+        asyncio.run(run())
