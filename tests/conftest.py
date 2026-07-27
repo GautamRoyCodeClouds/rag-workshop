@@ -131,6 +131,23 @@ def mid_page_boilerplate_pages() -> list[str]:
 
 
 @pytest.fixture
+def short_mid_page_boilerplate_pages() -> list[str]:
+    """Four *short* (5-line) pages sharing a repeated footer and a repeated
+    mid-page "Notes:" line -- the same shape as mid_page_boilerplate_pages,
+    but at the length where naive top-3/bottom-3 edge windows overlap and
+    swallow the whole page. Regression fixture for that overlap bug.
+    """
+    return [
+        f"Heading page {n}\n"
+        "\n"
+        f"Some unique body about page {n}.\n"
+        "Notes:\n"
+        "Repeated Footer Text"
+        for n in range(1, 5)
+    ]
+
+
+@pytest.fixture
 def dirty_pages() -> list[str]:
     """Raw page text as an extractor hands it over, including U+200B.
 

@@ -61,6 +61,49 @@ class TestCleanPages:
         assert "Notes:" in joined
         assert "Repeated Footer Text" not in joined
 
+    def test_mid_page_recurring_line_survives_on_a_short_page(
+        self, short_mid_page_boilerplate_pages
+    ):
+        # Regression test for the edge-window overlap bug: on a 5-line page,
+        # a naive top-3/bottom-3 window covers every line (range(0,3) union
+        # range(2,5) == {0,1,2,3,4}), leaving no protected middle at all --
+        # exactly the failure the positional constraint was meant to prevent.
+        # "Notes:" sits at index 3 of 5, squarely in the middle; it must
+        # survive, while the genuinely repeated footer on the same page must
+        # still be removed.
+        joined = "\n".join(clean_pages(short_mid_page_boilerplate_pages).pages)
+        assert "Notes:" in joined
+        assert "Repeated Footer Text" not in joined
+
+    def test_one_line_pages_are_never_treated_as_boilerplate(self):
+        # A one-line page has no room for a protected middle -- there is only
+        # one line, period. _find_boilerplate must leave it alone however
+        # often it repeats: the alternative is silently deleting the only
+        # content a page has.
+        pages = ["Only line here"] * 4
+        result = clean_pages(pages)
+        assert result.boilerplate_lines_removed == 0
+        assert all("Only line here" in page for page in result.pages)
+
+    def test_two_line_pages_do_not_crash_and_keep_detecting_a_real_header(self):
+        # Two lines is different from one: there is a genuine top line and a
+        # genuine bottom line, just no space between them for a middle. The
+        # positional filter still applies here -- it just can't protect
+        # anything, since the whole page is "edge" -- so a line recurring on
+        # one of the two positions is still caught, exactly as it was before
+        # this fix (this is the same shape test_four_pages_activates_
+        # boilerplate_detection already relies on). The point of this test is
+        # that it runs cleanly at this length, not that it preserves content
+        # the way the one-line case does.
+        pages = [
+            f"Alpha line\nUnique body line {n}" for n in range(1, 5)
+        ]
+        result = clean_pages(pages)
+        assert result.boilerplate_lines_removed == 4
+        joined = "\n".join(result.pages)
+        assert "Alpha line" not in joined
+        assert "Unique body line 1" in joined
+
     def test_squashes_whitespace_runs(self, dirty_pages):
         joined = "\n".join(clean_pages(dirty_pages).pages)
         assert "    " not in joined

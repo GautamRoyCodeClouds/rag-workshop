@@ -55,6 +55,23 @@ _BOILERPLATE_PAGE_FRACTION = 0.5
 # two apart, only position can.
 _BOILERPLATE_EDGE_LINES = 3
 
+# The middle region a page's top/bottom windows must leave untouched needs to
+# be at least this many lines before those windows are trusted to be that
+# wide. A naive top-N/bottom-N split doesn't scale down: on a page with only
+# 2*N or fewer lines, "top 3" and "bottom 3" overlap and cover the *entire*
+# page, leaving no middle at all -- which silently resurrects the exact bug
+# the positional constraint above was meant to fix (a genuine mid-page line
+# like "Notes:" getting caught in one of the windows and stripped as if it
+# were a header/footer). So the edge window shrinks on short pages to
+# guarantee this many lines survive in the middle before it is allowed to grow
+# toward _BOILERPLATE_EDGE_LINES.
+#
+# Below 2 lines there is no "top" and "bottom" to distinguish in the first
+# place -- both windows would collapse onto the same single line -- so that
+# case is handled separately (see _find_boilerplate): the positional filter
+# does not apply to it at all, rather than applying it degenerately.
+_BOILERPLATE_MIN_MIDDLE_LINES = 3
+
 # Only strip TOC lines from the front, where a TOC actually lives. A mid-document
 # line that happens to end in a number is probably data.
 _TOC_LEADING_FRACTION = 0.15
@@ -125,7 +142,27 @@ def _find_boilerplate(pages: list[str]) -> set[str]:
     counts: Counter[str] = Counter()
     for page in pages:
         lines = page.splitlines()
-        edge_count = min(_BOILERPLATE_EDGE_LINES, len(lines))
+        if len(lines) < 2:
+            # A single line has no "top" separate from its "bottom" -- both
+            # windows would just be that same line, so the positional check
+            # is meaningless here rather than merely small. Exempting it
+            # entirely means a recurring one-line page (a slide with just a
+            # title, say) can never have its only line silently deleted,
+            # which a window of size >=1 would otherwise allow.
+            edge_count = 0
+        else:
+            # Shrink the edge window so top-N and bottom-N leave at least
+            # _BOILERPLATE_MIN_MIDDLE_LINES of genuine middle between them --
+            # see that constant's comment for why. The window never shrinks
+            # below 1, though: with >=2 lines a real top and bottom always
+            # exist, and pinning the floor at 1 (rather than letting it hit 0)
+            # keeps the long-standing, tested behavior on very short pages
+            # where a window of exactly 1 still spans the whole page (e.g. a
+            # 2-line page) -- there is no middle to protect there either way,
+            # so shrinking further would only stop catching a real running
+            # header/footer without protecting anything in return.
+            max_edge_for_middle = (len(lines) - _BOILERPLATE_MIN_MIDDLE_LINES) // 2
+            edge_count = min(_BOILERPLATE_EDGE_LINES, max(1, max_edge_for_middle))
         edge_indexes = set(range(edge_count)) | set(
             range(len(lines) - edge_count, len(lines))
         )
