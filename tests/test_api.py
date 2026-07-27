@@ -56,6 +56,53 @@ class TestPage:
         ):
             assert label in body
 
+    def test_the_page_has_the_five_numbered_pipeline_sections(self, client):
+        body = client.get("/").text
+        for step, heading in enumerate(
+            (
+                "Load a document",
+                "Choose how to cut it",
+                "The chunks",
+                "Embed and store",
+                "What ChromaDB is holding",
+            ),
+            start=1,
+        ):
+            assert f'id="step-{step}"' in body
+            assert f"STEP {step}" in body
+            assert heading in body
+
+    def test_the_page_serves_its_local_stylesheet_and_script(self, client):
+        body = client.get("/").text
+        assert 'href="/static/app.css"' in body
+        assert 'src="/static/app.js"' in body
+        stylesheet = client.get("/static/app.css")
+        script = client.get("/static/app.js")
+        assert stylesheet.status_code == 200
+        assert "--cyan: #38e0cf" in stylesheet.text
+        assert script.status_code == 200
+        assert "Progressive-unlock client" in script.text
+
+    def test_the_page_embeds_server_rendered_session_state(self, client):
+        body = client.get("/").text
+        assert "window.__STATE__" in body
+        assert '"unlocked_step": 1' in body
+
+    def test_the_page_has_no_external_font_or_network_urls(self, client):
+        body = client.get("/").text
+        stylesheet = client.get("/static/app.css").text
+        script = client.get("/static/app.js").text
+        combined = "\n".join((body, stylesheet, script)).lower()
+        assert "fonts.googleapis.com" not in combined
+        assert "fonts.gstatic.com" not in combined
+        assert "@import url(" not in combined
+        assert "http://" not in combined
+        assert "https://" not in combined
+
+    def test_the_stylesheet_keeps_hidden_controls_out_of_the_layout(self, client):
+        stylesheet = client.get("/static/app.css").text
+        assert "[hidden] { display:none !important; }" in stylesheet
+
     def test_config_exposes_the_deck_defaults(self, client):
         data = client.get("/api/config").json()
         assert data["default_chunk_size"] == 700

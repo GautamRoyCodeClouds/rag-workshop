@@ -1,2 +1,79 @@
-<h1>RAG Ingestion</h1>
-{% for s in strategies %}<div>{{ s.label }}</div>{% endfor %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RAG Ingestion Pipeline</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="masthead">
+    <div class="eyebrow">Levels 2 &amp; 3 <span>•</span> Live teaching console</div>
+    <h1>Documents in, <em class="hl">vectors out.</em></h1>
+    <p>The indexing half of the pipeline, unlocked one decision at a time. Defaults: {{ settings.default_chunk_size }}-character chunks, {{ settings.default_chunk_overlap }} overlap, recursive splitting.</p>
+  </header>
+
+  <main class="pipeline" aria-label="RAG ingestion pipeline">
+    <div class="rail" aria-hidden="true"></div>
+    <div class="callout err" id="banner" role="alert" hidden></div>
+
+    <section class="step" id="step-1" data-locked="false" data-active="true" aria-labelledby="step-1-title">
+      <div class="step-head"><span class="step-num">STEP 1</span><h2 id="step-1-title">Load a document</h2><span class="step-state">input</span></div>
+      <div class="step-body">
+        <div class="drop" id="drop">
+          <p>Drag a PDF here, or <button type="button" id="pick">choose a file</button></p>
+          <p class="muted mono">Needs a text layer — scanned PDFs have none. Max {{ settings.max_upload_mb }} MB.</p>
+          <input type="file" id="file" accept="application/pdf" hidden>
+        </div>
+        {% if has_local_pdf %}
+        <div class="ctl"><button type="button" id="use-local">Use local document</button><span class="muted mono">Presenter shortcut — skips the file picker.</span></div>
+        {% endif %}
+        <div class="stats" id="upload-stats" hidden aria-live="polite"></div>
+        <div class="callout warn" id="clean-note" hidden></div>
+      </div>
+    </section>
+
+    <section class="step" id="step-2" data-locked="true" aria-labelledby="step-2-title" inert aria-disabled="true">
+      <div class="step-head"><span class="step-num">STEP 2</span><h2 id="step-2-title">Choose how to cut it</h2><span class="step-state">decision</span></div>
+      <div class="step-body">
+        <div class="strategies" id="strategies">
+          {% for s in strategies %}
+          <button type="button" class="strategy" data-key="{{ s.key }}" data-uses-size="{{ 'true' if s.uses_size else 'false' }}" data-uses-overlap="{{ 'true' if s.uses_overlap else 'false' }}" data-extra="{{ s.extra_control }}" aria-pressed="{{ 'true' if s.key == settings.default_strategy else 'false' }}">
+            <b>{{ s.label }}</b><span>{{ s.verdict }}</span>
+          </button>
+          {% endfor %}
+        </div>
+        <div class="sliders">
+          <label class="rng" id="size-label">Chunk size <b id="size-out">{{ settings.default_chunk_size }}</b> chars<input type="range" id="size" min="100" max="3000" step="50" value="{{ settings.default_chunk_size }}"></label>
+          <label class="rng" id="overlap-label">Overlap <b id="overlap-out">{{ settings.default_chunk_overlap }}</b> chars<input type="range" id="overlap" min="0" max="500" step="10" value="{{ settings.default_chunk_overlap }}"></label>
+          <label class="rng" id="percentile-label" hidden>Breakpoint percentile <b id="percentile-out">{{ settings.semantic_percentile }}</b><input type="range" id="percentile" min="50" max="99" step="1" value="{{ settings.semantic_percentile }}"></label>
+        </div>
+        <div class="callout" id="strategy-note"></div>
+        <div class="ctl"><button type="button" class="pri" id="run-chunk">Start chunking</button></div>
+      </div>
+    </section>
+
+    <section class="step" id="step-3" data-locked="true" aria-labelledby="step-3-title" inert aria-disabled="true">
+      <div class="step-head"><span class="step-num">STEP 3</span><h2 id="step-3-title">The chunks</h2><span class="step-state" id="chunk-count"></span></div>
+      <div class="step-body"><div class="callout warn" id="chunk-notes" hidden></div><div class="preview" id="chunk-preview" aria-live="polite"><p class="empty">Chunks will appear here as the document is split.</p></div></div>
+    </section>
+
+    <section class="step" id="step-4" data-locked="true" aria-labelledby="step-4-title" inert aria-disabled="true">
+      <div class="step-head"><span class="step-num">STEP 4</span><h2 id="step-4-title">Embed and store</h2><span class="step-state">vectors</span></div>
+      <div class="step-body">
+        <p class="muted"> <span class="mono">{{ settings.embed_model }}</span> · {{ settings.embed_dims }} dimensions · normalised, so cosine is a dot product. Runs on CPU, in this container, with no network.</p>
+        <div class="ctl"><button type="button" class="pri" id="run-embed">Start embedding</button></div>
+        <div class="bar" aria-label="Embedding progress"><i id="embed-bar"></i></div><div class="muted mono" id="embed-status" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <section class="step" id="step-5" data-locked="true" aria-labelledby="step-5-title" inert aria-disabled="true">
+      <div class="step-head"><span class="step-num">STEP 5</span><h2 id="step-5-title">What ChromaDB is holding</h2><span class="step-state" id="record-count"></span></div>
+      <div class="step-body"><div class="preview" id="records"><p class="empty">Stored vectors will appear here.</p></div><div class="ctl"><button type="button" id="prev-page">← Previous</button><button type="button" id="next-page">Next →</button><button type="button" class="danger" id="reset">Reset everything</button></div></div>
+    </section>
+  </main>
+  <script>window.__STATE__ = {{ state | tojson }};</script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
