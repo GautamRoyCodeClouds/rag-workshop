@@ -1,12 +1,12 @@
 services:
   chromadb:
-    image: chromadb/chroma:latest
+    image: chromadb/chroma:0.6.3
     container_name: chromadb
     restart: unless-stopped
     ports:
       - "8000:8000"
     volumes:
-      - chroma-data:/data
+      - chroma-data-v063:/data
     environment:
       # Persist collections to the mounted volume instead of memory
       IS_PERSISTENT: "TRUE"
@@ -40,5 +40,5 @@ services:
         condition: service_healthy
 
 volumes:
-  chroma-data:
+  chroma-data-v063:
   app-data:

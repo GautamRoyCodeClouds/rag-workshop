@@ -3,6 +3,9 @@ deck changed or someone drifted from it -- check the slide first.
 """
 from pathlib import Path
 
+import chromadb
+import yaml
+
 from app.config import Settings
 
 
@@ -44,3 +47,12 @@ def test_local_pdf_resolves_when_file_exists(tmp_path):
 
 def test_max_upload_bytes_computed_from_mb():
     assert Settings.from_env({"MAX_UPLOAD_MB": "2"}).max_upload_bytes == 2 * 1024 * 1024
+
+
+def test_compose_chroma_server_matches_the_installed_client_version():
+    compose_path = Path(__file__).parents[1] / "docker-compose.yml"
+    compose = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
+
+    assert compose["services"]["chromadb"]["image"] == (
+        f"chromadb/chroma:{chromadb.__version__}"
+    )
