@@ -392,8 +392,9 @@ services:
       PERSIST_DIRECTORY: /data
       ANONYMIZED_TELEMETRY: "FALSE"
     healthcheck:
-      # The image is slim (no curl), so probe the port with bash's /dev/tcp
-      test: ["CMD", "/bin/bash", "-c", "cat < /dev/null > /dev/tcp/localhost:8000"]
+      # The image is slim (no curl), so probe the port with bash's /dev/tcp.
+      # The /dev/tcp syntax requires a slash between host and port, not a colon.
+      test: ["CMD", "/bin/bash", "-c", "cat < /dev/null > /dev/tcp/localhost/8000"]
       interval: 30s
       timeout: 10s
       retries: 5

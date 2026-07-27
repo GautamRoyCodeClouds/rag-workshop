@@ -14,9 +14,7 @@ services:
       ANONYMIZED_TELEMETRY: "FALSE"
     healthcheck:
       # The image is slim (no curl), so probe the port with bash's /dev/tcp.
-      # Use 127.0.0.1, not localhost: chroma binds IPv4 only, but glibc's
-      # resolver here prefers the ::1 AAAA record for "localhost", so the
-      # IPv6-first lookup would always connection-refuse.
+      # The /dev/tcp syntax requires a slash between host and port, not a colon.
       test: ["CMD", "/bin/bash", "-c", "cat < /dev/null > /dev/tcp/127.0.0.1/8000"]
       interval: 30s
       timeout: 10s
