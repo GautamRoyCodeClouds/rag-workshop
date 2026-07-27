@@ -51,6 +51,22 @@ def test_vector_norm_of_a_unit_vector_is_one():
     assert vector_norm([0.6, 0.8]) == pytest.approx(1.0)
 
 
+def test_vector_norm_of_a_non_unit_vector_is_its_actual_length():
+    """Every test vector elsewhere in this suite (and in test_store.py) is
+    already unit-length, so a vector_norm that just returned 1.0 unconditionally
+    would pass every other test in the whole 90+ test suite -- including the
+    one the workshop deck relies on to show the room that normalisation really
+    happened. [3.0, 4.0] is the classic 3-4-5 triangle: its true Euclidean
+    length is 5.0, not 1.0, so this is the one assertion a hardcoded return 1.0
+    cannot satisfy.
+    """
+    assert vector_norm([3.0, 4.0]) == pytest.approx(5.0)
+
+
+def test_vector_norm_of_a_zero_vector_is_zero():
+    assert vector_norm([0.0, 0.0, 0.0]) == pytest.approx(0.0)
+
+
 @pytest.mark.slow
 def test_real_model_produces_l2_normalised_vectors():
     """The deck says normalise once at write time so cosine becomes a dot

@@ -57,12 +57,17 @@ def write_chunks(
 ) -> int:
     """Write chunks and their vectors, replacing any previous run.
 
-    Content-hash ids make a same-parameters re-run a clean overwrite. That alone
-    is not enough, though: ingesting at size 700 yields far more chunks than at
-    1500, so the tail of the earlier run would survive as orphans and quietly
-    pollute every later result. Hence the delete first, scoped to this
-    (doc_id, strategy) pair so a *different* strategy can sit alongside for
-    comparison.
+    Ids are `f"{doc_id[:12]}-{strategy}-{c.index}"` -- a truncated document
+    hash plus the chunk's position, not a hash of the chunk's own content. That
+    means a same-parameters re-run reuses the *same* ids, which sounds like an
+    overwrite but is not one: Chroma's `add` does not overwrite an existing id,
+    it logs "Insert of existing embedding ID" and keeps the old record. Without
+    the delete below, a re-run at the same size/overlap would silently retain
+    stale text under those ids. And a re-run at a *different* size is worse
+    without it: ingesting at size 700 yields far more chunks than at 1500, so
+    the tail of the earlier run would survive as orphans and quietly pollute
+    every later result. Hence the delete first, scoped to this (doc_id,
+    strategy) pair so a *different* strategy can sit alongside for comparison.
     """
     if not chunks:
         return 0
@@ -71,11 +76,24 @@ def write_chunks(
             f"{len(chunks)} chunks but {len(vectors)} vectors -- these must match."
         )
 
+    # chunks[0].strategy stands in for "this batch's strategy" here, while the
+    # metadata below records each chunk's *own* c.strategy. Those two only ever
+    # agree because chunkers.py's structure-aware fallback relabels its chunks
+    # to the requested strategy before returning (see chunkers.py's
+    # _chunk_structure, "strategy=structure" on the fallback branch) -- a
+    # result never mixes labels within one write_chunks call. If a future
+    # strategy ever returned a mixed-label batch, this delete would target the
+    # wrong scope.
     strategy = chunks[0].strategy
 
     collection.delete(where={"$and": [{"doc_id": doc_id}, {"strategy": strategy}]})
 
     collection.add(
+        # doc_id is a 64-char sha256 hex digest (loader.py); 12 hex characters
+        # is already 48 bits of entropy, far more than this demo's collection
+        # sizes need to stay collision-free, and keeps ids readable when
+        # they show up in logs or the browser UI. Not used for correctness --
+        # the delete above scopes on the full doc_id, not the truncated one.
         ids=[f"{doc_id[:12]}-{strategy}-{c.index}" for c in chunks],
         embeddings=vectors,
         documents=[c.text for c in chunks],
@@ -137,13 +155,15 @@ def read_records(
     records = []
     for position, record_id in enumerate(result["ids"]):
         # Chroma (0.6.3, verified against the installed image) returns
-        # embeddings as a numpy.ndarray of numpy.float64, not plain Python
-        # floats or a list of lists. Task 7 puts this dict straight through
-        # FastAPI's JSON encoder, which chokes on numpy scalars -- and
-        # round(np.float64, 4) itself returns another np.float64, so rounding
-        # alone does not fix it. Coerce every component to float() explicitly,
-        # both here and inside vector_norm's input, so nothing numpy survives
-        # into the returned dict.
+        # embeddings as a numpy.ndarray of numpy.float64. np.float64 is
+        # actually a subclass of Python float and serialises through FastAPI's
+        # JSON encoder fine as-is -- so this coercion is not fixing a break we
+        # have seen. It guards against a dtype chroma does not currently
+        # return: np.float32 is *not* a float subclass and would not survive
+        # JSON encoding. float() is cheap insurance against a future chroma
+        # version (or a different distance/quantization setting) handing back
+        # float32, so nothing numpy-shaped survives into the returned dict
+        # regardless of dtype.
         vector = [float(component) for component in result["embeddings"][position]]
         records.append({
             "id": record_id,
@@ -164,8 +184,21 @@ def read_records(
 
 
 def drop_collection(client, name: str | None = None) -> None:
-    """Delete the collection outright, for the UI's Reset control."""
-    try:
-        client.delete_collection(name or settings.chroma_collection)
-    except Exception:  # noqa: BLE001 - already absent is success for a reset
-        pass
+    """Delete the collection outright, for the UI's Reset control.
+
+    An absent collection should read as success -- resetting something that is
+    already gone is not a failure. The tempting shortcut is `except Exception:
+    pass` around delete_collection, but on chroma 0.6.3 that is too broad to
+    do its job: deleting an absent collection and failing to reach a dead
+    server both raise a plain ValueError, so catching Exception (or even
+    ValueError) cannot tell "already gone" apart from "store unreachable".
+    This is the presenter's mid-talk recovery control, so silently reporting
+    success while Chroma is actually down is the wrong failure mode -- it
+    would hide an outage behind a green checkmark. Checking membership via
+    list_collections() first avoids the ambiguity: only call delete_collection
+    when the collection is confirmed present, and let a connection failure
+    (which list_collections() would also raise on) propagate as itself.
+    """
+    target = name or settings.chroma_collection
+    if target in client.list_collections():
+        client.delete_collection(target)
