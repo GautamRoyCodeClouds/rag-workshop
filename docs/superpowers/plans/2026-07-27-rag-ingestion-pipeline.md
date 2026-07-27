@@ -2128,4 +2128,1095 @@ side in the browser while a re-run of one replaces only itself."
 
 ---
 
-*Tasks 6–9 (session state, API + SSE, frontend, docs) continue below.*
+## Task 6: Session state with refresh-safe persistence
+
+**Files:**
+- Create: `app/session.py`
+- Test: `tests/test_session.py`
+
+**Interfaces:**
+- Consumes: `app.config.settings` (Task 1), `Chunk` (Task 3).
+- Produces:
+  - `SessionState` dataclass: `session_id: str`, `created_at: str`, `upload: dict | None`, `chunking: dict | None`, `embedding: dict | None`, `chunks: list[Chunk]`, `pdf_path: str`, `page_offsets: list[tuple[int, int]]`; methods `unlocked_step() -> int`, `page_for_offset(offset: int) -> int`, `to_json() -> dict`
+  - `SessionStore` class with `get_or_create(session_id: str | None) -> SessionState`, `save(state) -> None`, `reset(session_id: str) -> SessionState`
+  - `SessionState.from_json(data: dict) -> SessionState`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/test_session.py`:
+
+```python
+"""Session tests.
+
+The persistence requirement is not academic: a browser refresh mid-demo must not
+send the presenter back to step 1 in front of a room.
+"""
+
+from app.pipeline.chunkers import Chunk
+from app.session import SessionState, SessionStore
+
+
+def make_store(tmp_path) -> SessionStore:
+    return SessionStore(data_dir=tmp_path)
+
+
+class TestUnlocking:
+    def test_a_fresh_session_only_unlocks_upload(self, tmp_path):
+        state = make_store(tmp_path).get_or_create(None)
+        assert state.unlocked_step() == 1
+
+    def test_upload_unlocks_configuration(self, tmp_path):
+        state = make_store(tmp_path).get_or_create(None)
+        state.upload = {"filename": "a.pdf", "doc_id": "x" * 64, "page_count": 3}
+        assert state.unlocked_step() == 2
+
+    def test_chunking_unlocks_embedding(self, tmp_path):
+        state = make_store(tmp_path).get_or_create(None)
+        state.upload = {"filename": "a.pdf"}
+        state.chunking = {"strategy": "recursive", "chunk_count": 12}
+        assert state.unlocked_step() == 4
+
+    def test_embedding_unlocks_the_browser(self, tmp_path):
+        state = make_store(tmp_path).get_or_create(None)
+        state.upload = {"filename": "a.pdf"}
+        state.chunking = {"strategy": "recursive", "chunk_count": 12}
+        state.embedding = {"vectors_written": 12}
+        assert state.unlocked_step() == 5
+
+
+class TestPersistence:
+    def test_a_saved_session_survives_a_new_store(self, tmp_path):
+        first = make_store(tmp_path)
+        state = first.get_or_create(None)
+        state.upload = {"filename": "handbook.pdf", "page_count": 270}
+        state.chunks = [Chunk(index=0, text="hello", start=0, strategy="recursive")]
+        first.save(state)
+
+        # A new store instance stands in for a restarted process.
+        rehydrated = make_store(tmp_path).get_or_create(state.session_id)
+        assert rehydrated.upload["page_count"] == 270
+        assert len(rehydrated.chunks) == 1
+        assert rehydrated.chunks[0].text == "hello"
+        assert rehydrated.chunks[0].strategy == "recursive"
+
+    def test_page_offsets_round_trip_as_tuples(self, tmp_path):
+        # JSON turns tuples into lists; page_for_offset must still work.
+        store = make_store(tmp_path)
+        state = store.get_or_create(None)
+        state.page_offsets = [(0, 1), (500, 2), (900, 3)]
+        store.save(state)
+
+        rehydrated = make_store(tmp_path).get_or_create(state.session_id)
+        assert rehydrated.page_for_offset(600) == 2
+        assert rehydrated.page_for_offset(0) == 1
+
+    def test_an_unknown_session_id_yields_a_fresh_session(self, tmp_path):
+        state = make_store(tmp_path).get_or_create("does-not-exist")
+        assert state.unlocked_step() == 1
+
+    def test_reset_clears_every_stage(self, tmp_path):
+        store = make_store(tmp_path)
+        state = store.get_or_create(None)
+        state.upload = {"filename": "a.pdf"}
+        state.chunking = {"chunk_count": 5}
+        state.chunks = [Chunk(index=0, text="t", start=0, strategy="fixed")]
+        store.save(state)
+
+        fresh = store.reset(state.session_id)
+        assert fresh.upload is None
+        assert fresh.chunking is None
+        assert fresh.chunks == []
+        assert store.get_or_create(state.session_id).unlocked_step() == 1
+
+    def test_to_json_omits_chunk_text_bodies(self, tmp_path):
+        """The client gets counts and metadata, not 423 chunk bodies twice."""
+        state = make_store(tmp_path).get_or_create(None)
+        state.chunks = [Chunk(index=0, text="x" * 700, start=0, strategy="fixed")]
+        assert "x" * 700 not in str(state.to_json())
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `docker compose run --rm app pytest tests/test_session.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'app.session'`
+
+- [ ] **Step 3: Write the session module**
+
+Create `app/session.py`:
+
+```python
+"""Per-session state and its on-disk mirror.
+
+This is a single-presenter demo, so state lives in memory. It is also mirrored to
+JSON, for one specific reason: a browser refresh mid-demo must not drop the
+presenter back to step 1 in front of a room.
+
+The step-unlock rule lives here rather than in the frontend, so the server is the
+single authority on what is reachable.
+"""
+
+from __future__ import annotations
+
+import bisect
+import json
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+
+from app.config import settings
+from app.pipeline.chunkers import Chunk
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+@dataclass
+class SessionState:
+    session_id: str
+    created_at: str
+    upload: dict | None = None
+    chunking: dict | None = None
+    embedding: dict | None = None
+
+    # Working data, persisted so a refresh can resume mid-pipeline.
+    chunks: list[Chunk] = field(default_factory=list)
+    pdf_path: str = ""
+    page_offsets: list[tuple[int, int]] = field(default_factory=list)
+
+    def unlocked_step(self) -> int:
+        """The highest step the user may interact with.
+
+        1 upload, 2 configure, 3 chunk, 4 embed, 5 browse. Steps 2 and 3 unlock
+        together: once a document is loaded, choosing a strategy and running it
+        are one interaction.
+        """
+        if self.embedding:
+            return 5
+        if self.chunking:
+            return 4
+        if self.upload:
+            return 2
+        return 1
+
+    def page_for_offset(self, offset: int) -> int:
+        """Page number for a character offset -- see loader.page_for_offset.
+
+        Duplicated here because the offsets survive a JSON round-trip while the
+        LoadResult object does not.
+        """
+        if not self.page_offsets:
+            return 1
+        starts = [start for start, _ in self.page_offsets]
+        index = max(bisect.bisect_right(starts, offset) - 1, 0)
+        return self.page_offsets[index][1]
+
+    def to_json(self) -> dict:
+        """The client-facing view.
+
+        Chunk bodies are excluded: they stream over SSE during step 3, and
+        shipping 423 of them again in a status payload would be waste.
+        """
+        return {
+            "session_id": self.session_id,
+            "created_at": self.created_at,
+            "upload": self.upload,
+            "chunking": self.chunking,
+            "embedding": self.embedding,
+            "unlocked_step": self.unlocked_step(),
+        }
+
+    def to_disk(self) -> dict:
+        """The full persisted view, chunk bodies included."""
+        return {
+            **self.to_json(),
+            "pdf_path": self.pdf_path,
+            "page_offsets": [list(pair) for pair in self.page_offsets],
+            "chunks": [
+                {
+                    "index": c.index,
+                    "text": c.text,
+                    "start": c.start,
+                    "strategy": c.strategy,
+                    "parent_id": c.parent_id,
+                    "parent_text": c.parent_text,
+                }
+                for c in self.chunks
+            ],
+        }
+
+    @classmethod
+    def from_json(cls, data: dict) -> "SessionState":
+        return cls(
+            session_id=data["session_id"],
+            created_at=data.get("created_at", _now_iso()),
+            upload=data.get("upload"),
+            chunking=data.get("chunking"),
+            embedding=data.get("embedding"),
+            pdf_path=data.get("pdf_path", ""),
+            # JSON has no tuples; restore them so bisect comparisons behave.
+            page_offsets=[tuple(pair) for pair in data.get("page_offsets", [])],
+            chunks=[Chunk(**item) for item in data.get("chunks", [])],
+        )
+
+
+class SessionStore:
+    """In-memory sessions with a JSON mirror on disk."""
+
+    def __init__(self, data_dir: Path | None = None):
+        self.data_dir = Path(data_dir or settings.data_dir) / "sessions"
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self._live: dict[str, SessionState] = {}
+
+    def _path(self, session_id: str) -> Path:
+        # Session ids are generated uuid4 hex strings, never user input, so they
+        # are safe as filenames. Validated anyway rather than trusted.
+        if not session_id.isalnum():
+            raise ValueError(f"Malformed session id: {session_id!r}")
+        return self.data_dir / f"{session_id}.json"
+
+    def get_or_create(self, session_id: str | None) -> SessionState:
+        """Return the live session, rehydrate it from disk, or start a new one."""
+        if session_id:
+            if session_id in self._live:
+                return self._live[session_id]
+            try:
+                path = self._path(session_id)
+            except ValueError:
+                path = None
+            if path is not None and path.is_file():
+                state = SessionState.from_json(json.loads(path.read_text()))
+                self._live[state.session_id] = state
+                return state
+
+        state = SessionState(session_id=uuid.uuid4().hex, created_at=_now_iso())
+        self._live[state.session_id] = state
+        return state
+
+    def save(self, state: SessionState) -> None:
+        """Mirror a session to disk atomically.
+
+        Written to a temporary file and moved into place, so a crash mid-write
+        cannot leave a half-written session that fails to parse on reload.
+        """
+        self._live[state.session_id] = state
+        target = self._path(state.session_id)
+        temp = target.with_suffix(".json.tmp")
+        temp.write_text(json.dumps(state.to_disk(), indent=2))
+        temp.replace(target)
+
+    def reset(self, session_id: str) -> SessionState:
+        """Discard a session's progress, keeping the same id."""
+        fresh = SessionState(session_id=session_id, created_at=_now_iso())
+        self.save(fresh)
+        return fresh
+
+
+store = SessionStore()
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `docker compose run --rm app pytest tests/test_session.py -v`
+Expected: PASS, 10 passed
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add app/session.py tests/test_session.py
+git commit -m "feat: session state with refresh-safe JSON persistence
+
+A browser refresh mid-demo must not drop the presenter back to step 1 in front
+of a room, so each completed stage is mirrored to disk and rehydrated on reload.
+Writes go through a temp file and rename so a crash cannot leave an unparseable
+session behind.
+
+The unlock rule lives server-side, making the server the single authority on
+what is reachable rather than trusting the DOM."
+```
+
+---
+
+## Task 7: API routes and SSE job plumbing
+
+**Files:**
+- Create: `app/jobs.py`
+- Modify: `app/main.py` (replace wholesale — the health route is retained inside)
+- Test: `tests/test_api.py`
+
+**Interfaces:**
+- Consumes: everything from Tasks 1–6.
+- Produces:
+  - `app.jobs.Job` dataclass: `job_id`, `queue`, `status`, `events`, `error`
+  - `app.jobs.JobRegistry` with `create() -> Job`, `get(job_id) -> Job | None`, `publish(job, event: dict) -> None` (thread-safe), `finish(job, status, error="") -> None`
+  - `app.jobs.sse_format(event: dict) -> str`
+  - Routes: `GET /`, `GET /api/health`, `GET /api/config`, `POST /api/upload`, `POST /api/use-local`, `POST /api/chunk`, `POST /api/embed`, `GET /api/events/{job_id}`, `GET /api/status/{job_id}`, `GET /api/collection`, `POST /api/reset`
+
+**On progress honesty:** LangChain's splitters have no streaming API — they return every chunk at once. So step 3 emits a `stage` event while splitting runs in a worker thread, then emits one `chunk` event per result as fast as the client consumes them. The *rendering* streams; the splitting does not. Embedding progress is genuinely incremental, one event per encoded batch. No artificial delays anywhere.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/test_api.py`:
+
+```python
+"""API tests using FastAPI's TestClient.
+
+Chroma is stubbed with an ephemeral in-process client, so these run without a
+server. The SSE endpoints are tested by draining the job queue directly, which
+is far more reliable than parsing a streaming response under test.
+"""
+
+import json
+
+import chromadb
+import pytest
+from fastapi.testclient import TestClient
+
+import app.main as main_module
+from app.jobs import JobRegistry, sse_format
+
+
+@pytest.fixture(autouse=True)
+def isolated_state(tmp_path, monkeypatch):
+    """Point sessions at tmp_path and Chroma at an ephemeral client."""
+    from app.session import SessionStore
+
+    monkeypatch.setattr(main_module, "store", SessionStore(data_dir=tmp_path))
+    client = chromadb.EphemeralClient()
+    monkeypatch.setattr(main_module, "get_client", lambda *a, **k: client)
+    monkeypatch.setattr(main_module.settings, "data_dir", tmp_path, raising=False)
+    yield
+
+
+@pytest.fixture
+def client():
+    return TestClient(main_module.app)
+
+
+class TestPage:
+    def test_the_page_renders(self, client):
+        response = client.get("/")
+        assert response.status_code == 200
+        assert "text/html" in response.headers["content-type"]
+
+    def test_the_page_lists_all_five_strategies(self, client):
+        body = client.get("/").text
+        for label in ("Fixed size", "Recursive", "Structure aware", "Semantic", "Parent document"):
+            assert label in body
+
+    def test_config_exposes_the_deck_defaults(self, client):
+        data = client.get("/api/config").json()
+        assert data["default_chunk_size"] == 700
+        assert data["default_chunk_overlap"] == 100
+        assert data["default_strategy"] == "recursive"
+        assert len(data["strategies"]) == 5
+
+    def test_config_reports_whether_a_local_document_exists(self, client):
+        # Unset in tests, so the button must not be offered.
+        assert client.get("/api/config").json()["has_local_pdf"] is False
+
+
+class TestUpload:
+    def test_rejects_a_non_pdf(self, client):
+        response = client.post(
+            "/api/upload",
+            files={"file": ("notes.txt", b"hello", "text/plain")},
+        )
+        assert response.status_code == 400
+        assert "pdf" in response.json()["detail"].lower()
+
+    def test_rejects_a_file_over_the_size_limit(self, client, monkeypatch):
+        monkeypatch.setattr(main_module.settings, "max_upload_mb", 0, raising=False)
+        response = client.post(
+            "/api/upload",
+            files={"file": ("big.pdf", b"%PDF-1.4" + b"x" * 2048, "application/pdf")},
+        )
+        assert response.status_code == 400
+        assert "too large" in response.json()["detail"].lower()
+
+    def test_accepts_a_real_pdf_and_unlocks_step_two(self, client, structured_pdf):
+        with open(structured_pdf, "rb") as handle:
+            response = client.post(
+                "/api/upload",
+                files={"file": ("handbook.pdf", handle.read(), "application/pdf")},
+            )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["upload"]["page_count"] == 5
+        assert body["unlocked_step"] == 2
+        assert "boilerplate_lines_removed" in body["upload"]
+
+    def test_reports_a_scanned_pdf_clearly(self, client, tmp_path):
+        from reportlab.pdfgen import canvas
+
+        path = tmp_path / "scanned.pdf"
+        pdf = canvas.Canvas(str(path))
+        pdf.showPage()
+        pdf.save()
+
+        with open(path, "rb") as handle:
+            response = client.post(
+                "/api/upload",
+                files={"file": ("scanned.pdf", handle.read(), "application/pdf")},
+            )
+        assert response.status_code == 400
+        assert "text layer" in response.json()["detail"]
+
+    def test_use_local_is_unavailable_when_unconfigured(self, client):
+        assert client.post("/api/use-local").status_code == 404
+
+
+class TestChunkAndEmbed:
+    def upload(self, client, structured_pdf):
+        with open(structured_pdf, "rb") as handle:
+            return client.post(
+                "/api/upload",
+                files={"file": ("handbook.pdf", handle.read(), "application/pdf")},
+            ).json()
+
+    def test_chunking_requires_an_upload_first(self, client):
+        response = client.post("/api/chunk", json={"strategy": "recursive"})
+        assert response.status_code == 409
+        assert "upload" in response.json()["detail"].lower()
+
+    def test_chunking_rejects_an_unknown_strategy(self, client, structured_pdf):
+        self.upload(client, structured_pdf)
+        response = client.post("/api/chunk", json={"strategy": "nonsense"})
+        assert response.status_code == 400
+
+    def test_chunking_returns_a_job_id(self, client, structured_pdf):
+        self.upload(client, structured_pdf)
+        response = client.post(
+            "/api/chunk",
+            json={"strategy": "recursive", "size": 200, "overlap": 20},
+        )
+        assert response.status_code == 202
+        assert response.json()["job_id"]
+
+    def test_status_reports_a_finished_chunk_job(self, client, structured_pdf):
+        self.upload(client, structured_pdf)
+        job_id = client.post(
+            "/api/chunk", json={"strategy": "recursive", "size": 200, "overlap": 20}
+        ).json()["job_id"]
+
+        status = client.get(f"/api/status/{job_id}").json()
+        assert status["status"] in {"running", "done"}
+        # TestClient runs background tasks to completion before returning.
+        assert status["status"] == "done"
+        assert any(e["type"] == "chunk" for e in status["events"])
+        assert any(e["type"] == "done" for e in status["events"])
+
+    def test_embedding_requires_chunking_first(self, client, structured_pdf):
+        self.upload(client, structured_pdf)
+        response = client.post("/api/embed")
+        assert response.status_code == 409
+
+    def test_status_for_an_unknown_job_is_404(self, client):
+        assert client.get("/api/status/nope").status_code == 404
+
+
+class TestCollectionAndReset:
+    def test_the_collection_reads_empty(self, client):
+        body = client.get("/api/collection").json()
+        assert body["total"] == 0
+        assert body["records"] == []
+
+    def test_reset_returns_a_clean_session(self, client, structured_pdf):
+        with open(structured_pdf, "rb") as handle:
+            client.post(
+                "/api/upload",
+                files={"file": ("h.pdf", handle.read(), "application/pdf")},
+            )
+        body = client.post("/api/reset", json={"drop_collection": True}).json()
+        assert body["unlocked_step"] == 1
+        assert body["upload"] is None
+
+
+class TestSseFormatting:
+    def test_formats_as_a_data_line_pair(self):
+        assert sse_format({"type": "done"}) == 'data: {"type": "done"}\n\n'
+
+    def test_payload_is_valid_json(self):
+        raw = sse_format({"type": "chunk", "index": 3})
+        assert json.loads(raw.removeprefix("data: ").strip())["index"] == 3
+
+
+class TestJobRegistry:
+    def test_publish_records_events_for_the_polling_fallback(self):
+        registry = JobRegistry()
+        job = registry.create()
+        registry.publish(job, {"type": "chunk", "index": 0})
+        assert job.events == [{"type": "chunk", "index": 0}]
+
+    def test_finish_sets_the_terminal_status(self):
+        registry = JobRegistry()
+        job = registry.create()
+        registry.finish(job, "error", "boom")
+        assert job.status == "error"
+        assert job.error == "boom"
+
+    def test_unknown_job_lookup_returns_none(self):
+        assert JobRegistry().get("absent") is None
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `docker compose run --rm app pytest tests/test_api.py -v`
+Expected: FAIL — `ImportError: cannot import name 'JobRegistry' from 'app.jobs'`
+
+- [ ] **Step 3: Write the job registry**
+
+Create `app/jobs.py`:
+
+```python
+"""Background jobs and their event streams.
+
+Deliberately small: an asyncio task per job and a queue per job. The spec
+rejected Celery and Redis for this, because four containers and a broker are a
+lot of failure surface for a one-document corpus, and task serialisation would
+sit between a reader and the pipeline code they came to read.
+
+Every job keeps its events in a list as well as a queue, so a dropped SSE
+connection can fall back to polling without losing history.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import uuid
+from dataclasses import dataclass, field
+
+
+@dataclass
+class Job:
+    job_id: str
+    queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+    status: str = "running"          # running | done | error
+    events: list[dict] = field(default_factory=list)
+    error: str = ""
+
+
+def sse_format(event: dict) -> str:
+    """Render one event as a Server-Sent Events frame."""
+    return f"data: {json.dumps(event)}\n\n"
+
+
+class JobRegistry:
+    """Tracks in-flight jobs for one process."""
+
+    def __init__(self) -> None:
+        self._jobs: dict[str, Job] = {}
+
+    def create(self) -> Job:
+        job = Job(job_id=uuid.uuid4().hex)
+        self._jobs[job.job_id] = job
+        return job
+
+    def get(self, job_id: str) -> Job | None:
+        return self._jobs.get(job_id)
+
+    def publish(self, job: Job, event: dict) -> None:
+        """Record an event and push it to any listening SSE stream.
+
+        Safe to call from a worker thread: put_nowait on an unbounded queue does
+        not block, and the history list append is atomic under the GIL. Pipeline
+        work runs via asyncio.to_thread so it cannot stall the event loop, which
+        would otherwise leave SSE frames unflushed.
+        """
+        job.events.append(event)
+        job.queue.put_nowait(event)
+
+    def finish(self, job: Job, status: str, error: str = "") -> None:
+        job.status = status
+        job.error = error
+        self.publish(job, {"type": status, "error": error} if error else {"type": status})
+        # Sentinel so an SSE consumer knows to close rather than hang.
+        job.queue.put_nowait(None)
+
+
+registry = JobRegistry()
+```
+
+- [ ] **Step 4: Write the routes**
+
+Replace `app/main.py` entirely:
+
+```python
+"""FastAPI application: routes for the five-step ingestion page.
+
+Route shape follows the steps. Each mutating route updates the session and
+returns the session view, so the client always learns which step is unlocked from
+the server rather than deciding for itself.
+
+Long-running work goes through app.jobs: the route returns a job id immediately
+and the client subscribes to /api/events/{job_id}.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+import chromadb
+from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+
+from app.config import settings
+from app.jobs import registry, sse_format
+from app.pipeline import store as vector_store
+from app.pipeline.chunkers import STRATEGIES, UnknownStrategyError, chunk
+from app.pipeline.embedder import build_embeddings, embed_batched
+from app.pipeline.loader import EmptyDocumentError, load_pdf
+from app.pipeline.store import get_client
+from app.session import store
+
+BASE_DIR = Path(__file__).parent
+
+app = FastAPI(title="RAG Ingestion Pipeline", docs_url="/api/docs")
+app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
+templates = Jinja2Templates(directory=BASE_DIR / "templates")
+
+SESSION_COOKIE = "rag_session"
+
+
+def _session(request: Request):
+    return store.get_or_create(request.cookies.get(SESSION_COOKIE))
+
+
+def _with_session_cookie(response: Response, session_id: str) -> None:
+    response.set_cookie(SESSION_COOKIE, session_id, httponly=True, samesite="lax")
+
+
+def _collection():
+    """Fetch the working collection, converting connection failure into a 503."""
+    try:
+        return vector_store.get_collection(get_client())
+    except Exception as exc:  # noqa: BLE001 - becomes a retry banner in the UI
+        raise HTTPException(
+            status_code=503,
+            detail=f"ChromaDB is unreachable ({type(exc).__name__}). "
+            "Check that the chromadb container is running, then retry.",
+        ) from exc
+
+
+# ---------------------------------------------------------------- page & config
+
+
+@app.get("/", response_class=HTMLResponse)
+def index(request: Request):
+    state = _session(request)
+    response = templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={
+            "strategies": list(STRATEGIES.values()),
+            "settings": settings,
+            "state": state.to_json(),
+            "has_local_pdf": settings.local_pdf is not None,
+        },
+    )
+    _with_session_cookie(response, state.session_id)
+    return response
+
+
+@app.get("/api/config")
+def config() -> dict:
+    """Defaults and strategy metadata, so the client hardcodes nothing."""
+    return {
+        "default_chunk_size": settings.default_chunk_size,
+        "default_chunk_overlap": settings.default_chunk_overlap,
+        "default_strategy": settings.default_strategy,
+        "semantic_percentile": settings.semantic_percentile,
+        "embed_model": settings.embed_model,
+        "embed_dims": settings.embed_dims,
+        "max_upload_mb": settings.max_upload_mb,
+        "has_local_pdf": settings.local_pdf is not None,
+        "strategies": [
+            {
+                "key": info.key,
+                "label": info.label,
+                "verdict": info.verdict,
+                "uses_size": info.uses_size,
+                "uses_overlap": info.uses_overlap,
+                "extra_control": info.extra_control,
+            }
+            for info in STRATEGIES.values()
+        ],
+    }
+
+
+@app.get("/api/health")
+def health() -> dict:
+    chroma_ok, detail = False, ""
+    try:
+        chromadb.HttpClient(
+            host=settings.chroma_host, port=settings.chroma_port
+        ).heartbeat()
+        chroma_ok = True
+    except Exception as exc:  # noqa: BLE001 - surfaced to the UI
+        detail = f"{type(exc).__name__}: {exc}"
+    return {
+        "status": "ok" if chroma_ok else "degraded",
+        "chroma": {"reachable": chroma_ok, "detail": detail},
+        "embed_model": settings.embed_model,
+        "embed_dims": settings.embed_dims,
+    }
+
+
+# ------------------------------------------------------------------ step 1: load
+
+
+def _ingest_path(state, path: Path, display_name: str) -> dict:
+    """Load a PDF into the session, or raise a 400 the UI can display."""
+    try:
+        result = load_pdf(path)
+    except EmptyDocumentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - corrupt or encrypted PDF
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not read {display_name}: {type(exc).__name__}. "
+            "If the file is password protected, remove the protection first.",
+        ) from exc
+
+    state.pdf_path = str(path)
+    state.page_offsets = result.page_offsets
+    state.upload = {
+        "filename": display_name,
+        "doc_id": result.doc_id,
+        "page_count": result.page_count,
+        "char_count": result.char_count,
+        "pages_without_text": result.pages_without_text,
+        "boilerplate_lines_removed": result.boilerplate_lines_removed,
+        "invisible_chars_removed": result.invisible_chars_removed,
+    }
+    # A new document invalidates everything downstream.
+    state.chunking = None
+    state.embedding = None
+    state.chunks = []
+    store.save(state)
+    return state.to_json()
+
+
+@app.post("/api/upload")
+async def upload(request: Request, file: UploadFile = File(...)) -> Response:
+    state = _session(request)
+
+    if not (file.filename or "").lower().endswith(".pdf"):
+        raise HTTPException(
+            status_code=400,
+            detail="Only PDF files are supported. RAG needs extractable text, "
+            "and this pipeline reads it from a PDF text layer.",
+        )
+
+    payload = await file.read()
+    if len(payload) > settings.max_upload_bytes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File is too large: {len(payload) / 1_048_576:.1f} MB exceeds "
+            f"the {settings.max_upload_mb} MB limit.",
+        )
+
+    uploads = Path(settings.data_dir) / "uploads" / state.session_id
+    uploads.mkdir(parents=True, exist_ok=True)
+    target = uploads / "source.pdf"
+    target.write_bytes(payload)
+
+    body = _ingest_path(state, target, file.filename or "document.pdf")
+    response = Response(
+        content=__import__("json").dumps(body), media_type="application/json"
+    )
+    _with_session_cookie(response, state.session_id)
+    return response
+
+
+@app.post("/api/use-local")
+def use_local(request: Request) -> dict:
+    """Load the presenter's bind-mounted document.
+
+    Only available when LOCAL_PDF_PATH resolves, which it does not for attendees
+    -- so the UI never shows the button and this route reports 404 if called.
+    """
+    local = settings.local_pdf
+    if local is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No local document is configured. See docker-compose.override.yml.example.",
+        )
+    return _ingest_path(_session(request), local, local.name)
+
+
+# -------------------------------------------------------------- step 2/3: chunk
+
+
+@app.post("/api/chunk")
+async def start_chunking(request: Request) -> Response:
+    state = _session(request)
+    if not state.upload:
+        raise HTTPException(status_code=409, detail="Upload a document first.")
+
+    body = await request.json() if await request.body() else {}
+    strategy = body.get("strategy", settings.default_strategy)
+    size = int(body.get("size", settings.default_chunk_size))
+    overlap = int(body.get("overlap", settings.default_chunk_overlap))
+    percentile = int(body.get("percentile", settings.semantic_percentile))
+
+    if strategy not in STRATEGIES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown strategy {strategy!r}. Valid: {', '.join(sorted(STRATEGIES))}.",
+        )
+
+    job = registry.create()
+
+    async def run() -> None:
+        try:
+            registry.publish(job, {"type": "stage", "message": f"Splitting with {strategy}..."})
+            text = load_pdf(state.pdf_path).text
+
+            # Semantic chunking needs the model; the others do not, so it is only
+            # loaded when actually required.
+            embeddings = build_embeddings() if strategy == "semantic" else None
+
+            # to_thread keeps the event loop free, so SSE frames keep flushing
+            # while a CPU-bound splitter runs.
+            result = await asyncio.to_thread(
+                chunk,
+                text,
+                strategy=strategy,
+                size=size,
+                overlap=overlap,
+                embeddings=embeddings,
+                percentile=percentile,
+            )
+
+            for note in result.notes:
+                registry.publish(job, {"type": "note", "message": note})
+
+            # LangChain splitters return everything at once, so this streams the
+            # rendering, not the splitting. No artificial delay is added.
+            for piece in result.chunks:
+                registry.publish(job, {
+                    "type": "chunk",
+                    "index": piece.index,
+                    "text": piece.text,
+                    "char_count": len(piece.text),
+                    "page": state.page_for_offset(piece.start),
+                    "parent_id": piece.parent_id,
+                })
+
+            state.chunks = result.chunks
+            state.chunking = {
+                "strategy": strategy,
+                "size": size,
+                "overlap": overlap,
+                "percentile": percentile,
+                "chunk_count": len(result.chunks),
+                "sections_detected": result.sections_detected,
+                "fell_back": result.fell_back,
+                "notes": result.notes,
+            }
+            state.embedding = None
+            store.save(state)
+
+            registry.publish(job, {
+                "type": "summary",
+                "chunk_count": len(result.chunks),
+                "sections_detected": result.sections_detected,
+                "fell_back": result.fell_back,
+            })
+            registry.finish(job, "done")
+        except UnknownStrategyError as exc:
+            registry.finish(job, "error", str(exc))
+        except Exception as exc:  # noqa: BLE001 - reported in the step card
+            registry.finish(job, "error", f"{type(exc).__name__}: {exc}")
+
+    asyncio.create_task(run())
+    response = Response(
+        content=__import__("json").dumps({"job_id": job.job_id}),
+        media_type="application/json",
+        status_code=202,
+    )
+    _with_session_cookie(response, state.session_id)
+    return response
+
+
+# ------------------------------------------------------------------ step 4: embed
+
+
+@app.post("/api/embed")
+def start_embedding(request: Request) -> Response:
+    state = _session(request)
+    if not state.chunks:
+        raise HTTPException(status_code=409, detail="Chunk the document first.")
+
+    collection = _collection()
+    job = registry.create()
+
+    async def run() -> None:
+        try:
+            registry.publish(job, {
+                "type": "stage",
+                "message": f"Loading {settings.embed_model}...",
+            })
+            embeddings = await asyncio.to_thread(build_embeddings)
+
+            texts = [piece.text for piece in state.chunks]
+            loop = asyncio.get_running_loop()
+
+            def on_progress(done: int, total: int) -> None:
+                # Called from the worker thread; hop back to the loop thread.
+                loop.call_soon_threadsafe(
+                    registry.publish,
+                    job,
+                    {"type": "embedded", "done": done, "total": total},
+                )
+
+            vectors = await asyncio.to_thread(
+                embed_batched,
+                embeddings,
+                texts,
+                settings.embed_batch_size,
+                on_progress,
+            )
+
+            registry.publish(job, {"type": "stage", "message": "Writing to ChromaDB..."})
+            written = await asyncio.to_thread(
+                vector_store.write_chunks,
+                collection,
+                chunks=state.chunks,
+                vectors=vectors,
+                doc_id=state.upload["doc_id"],
+                source=state.upload["filename"],
+                size=state.chunking["size"],
+                overlap=state.chunking["overlap"],
+                embed_model=settings.embed_model,
+                page_for_offset=state.page_for_offset,
+            )
+
+            state.embedding = {
+                "model": settings.embed_model,
+                "dims": settings.embed_dims,
+                "vectors_written": written,
+            }
+            store.save(state)
+
+            registry.publish(job, {"type": "summary", "vectors_written": written})
+            registry.finish(job, "done")
+        except Exception as exc:  # noqa: BLE001 - reported in the step card
+            registry.finish(job, "error", f"{type(exc).__name__}: {exc}")
+
+    asyncio.create_task(run())
+    response = Response(
+        content=__import__("json").dumps({"job_id": job.job_id}),
+        media_type="application/json",
+        status_code=202,
+    )
+    _with_session_cookie(response, state.session_id)
+    return response
+
+
+# ------------------------------------------------------------- progress channels
+
+
+@app.get("/api/events/{job_id}")
+async def events(job_id: str):
+    """Stream a job's events as Server-Sent Events."""
+    job = registry.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Unknown job.")
+
+    async def stream():
+        # Replay history first, so a client that connects late sees everything.
+        for event in list(job.events):
+            yield sse_format(event)
+        if job.status != "running":
+            return
+        while True:
+            event = await job.queue.get()
+            if event is None:      # finish() sentinel
+                break
+            yield sse_format(event)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/status/{job_id}")
+def job_status(job_id: str) -> dict:
+    """Polling fallback for when SSE cannot be established."""
+    job = registry.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Unknown job.")
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "error": job.error,
+        "events": job.events,
+    }
+
+
+# ----------------------------------------------------------- step 5: inspect
+
+
+@app.get("/api/collection")
+def collection_records(offset: int = 0, limit: int = 25) -> dict:
+    return vector_store.read_records(_collection(), offset=offset, limit=min(limit, 100))
+
+
+@app.post("/api/reset")
+async def reset(request: Request) -> Response:
+    state = _session(request)
+    body = await request.json() if await request.body() else {}
+    if body.get("drop_collection"):
+        try:
+            vector_store.drop_collection(get_client())
+        except Exception:  # noqa: BLE001 - reset should not fail on a dead Chroma
+            pass
+    fresh = store.reset(state.session_id)
+    response = Response(
+        content=__import__("json").dumps(fresh.to_json()), media_type="application/json"
+    )
+    _with_session_cookie(response, fresh.session_id)
+    return response
+```
+
+- [ ] **Step 5: Run test to verify it passes**
+
+Run: `docker compose run --rm app pytest tests/test_api.py -v`
+Expected: PASS, 21 passed
+
+This task depends on `app/templates/index.html` and `app/static/` existing. Create placeholders so the mount and render succeed, and Task 8 fills them in:
+
+```bash
+mkdir -p app/templates app/static
+printf '<h1>RAG Ingestion</h1>\n{%% for s in strategies %%}<div>{{ s.label }}</div>{%% endfor %%}\n' > app/templates/index.html
+touch app/static/.gitkeep
+```
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add app/jobs.py app/main.py app/templates/index.html app/static/.gitkeep tests/test_api.py
+git commit -m "feat: API routes with SSE progress and a polling fallback
+
+One asyncio task and one queue per job -- no broker, per the spec. Jobs keep an
+event history alongside the queue, so a dropped SSE connection falls back to
+polling /api/status without losing anything, and a late subscriber gets a replay.
+
+CPU-bound work runs through asyncio.to_thread so the event loop keeps flushing
+frames, and the embedder's thread hops back via call_soon_threadsafe to publish.
+Chunk streaming is honest: LangChain splitters return everything at once, so the
+rendering streams while the split does not. No artificial delays."
+```
+
+---
+
+*Tasks 8–9 (frontend, docs) continue below.*
