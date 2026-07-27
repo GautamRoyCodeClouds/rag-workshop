@@ -79,12 +79,25 @@ build context.
   find on the presenter's disk, and never name one in tracked files.
 
 Remember the non-git channels too. Running the pipeline leaves the document's
-text in the `app-data` and `chroma-data-v063` volumes — as
-`/data/uploads/<sid>/source.pdf`, as chunk bodies inside
-`/data/sessions/<sid>.json`, and as `documents` in the Chroma collection. The
-UI's "Reset everything" drops the collection and clears *one* session's state,
-but does **not** delete uploaded files or other sessions. Clear the volumes
-(`docker compose down -v`) before demoing or sharing a machine.
+text in the `app-data` and `chroma-data-v063` volumes in four places:
+
+- `/data/uploads/<sid>/source.pdf` — the uploaded file itself
+- `/data/uploads/<sid>/cleaned.txt` — the cached cleaned text (see below)
+- `/data/sessions/<sid>.json` — chunk bodies, persisted for refresh recovery
+- the Chroma collection — `documents` holds every chunk's text
+
+The UI's "Reset everything" clears all four **for the current session**: it
+drops the collection, clears the session state, and deletes that session's
+upload directory. It does not touch *other* sessions, so before demoing on or
+sharing a machine, clear the volumes outright with `docker compose down -v`.
+
+Anything that adds a fifth copy must be deleted by `reset()` too. That is why
+the cleaned-text cache lives inside `uploads/<sid>/` rather than beside the
+session JSON: `reset()` already removes that whole directory, so the new file
+is cleaned up by existing behaviour with no second code path to remember.
+Never derive a deletion target from `state.pdf_path` — with the "Use local
+document" shortcut it points at a read-only mount of a file *outside* the
+volume, i.e. the presenter's own document.
 
 ### 2. Never fake progress
 

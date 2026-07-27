@@ -158,6 +158,25 @@ class SessionStore:
         self._path(session_id)
         return self.root / "uploads" / session_id
 
+    def text_cache_path(self, session_id: str) -> Path:
+        """Where the document's cleaned text is cached for re-chunking.
+
+        Deliberately inside uploads_dir rather than beside the session JSON.
+        Two reasons, and the first is the important one:
+
+        - Cached text is a copy of the document. Keeping it in the directory
+          reset() already deletes means it cannot outlive the PDF it came from,
+          with no second cleanup path to remember. When the source document is
+          confidential, an extra copy that nothing clears is the bug.
+        - It inherits uploads_dir's session-id guard, so a crafted id cannot
+          read or write outside the volume.
+
+        Not kept on SessionState: that object is serialised to JSON on every
+        stage transition, so a few hundred KB of text would be rewritten on
+        each save, and lost on restart anyway.
+        """
+        return self.uploads_dir(session_id) / "cleaned.txt"
+
     def get_or_create(self, session_id: str | None) -> SessionState:
         """Return the live session, rehydrate it from disk, or start a new one."""
         if session_id:

@@ -474,6 +474,92 @@ class TestChunkAndEmbed:
         )
 
 
+class TestCleanedTextCache:
+    """Chunking reads the text cached at upload instead of re-parsing the PDF.
+
+    Re-parsing was the single most expensive step in the pipeline -- measured at
+    0.6s on a structurally simple 270-page PDF and materially worse on a real
+    one, against 0.01-0.4s for the chunking itself. Since the presenter compares
+    all five strategies live, that cost was paid on every comparison.
+    """
+
+    def upload(self, client, structured_pdf):
+        with open(structured_pdf, "rb") as handle:
+            return client.post(
+                "/api/upload",
+                files={"file": ("handbook.pdf", handle.read(), "application/pdf")},
+            ).json()
+
+    def run_chunking(self, client):
+        job_id = client.post("/api/chunk", json={"strategy": "recursive"}).json()["job_id"]
+        for _ in range(100):
+            status = client.get(f"/api/status/{job_id}").json()
+            if status["status"] != "running":
+                return status
+            time.sleep(0.02)
+        raise AssertionError(f"job did not finish: {status}")
+
+    def cache_path(self, client):
+        return main_module.store.text_cache_path(client.cookies["rag_session"])
+
+    def test_chunking_does_not_reparse_the_pdf(self, client, structured_pdf, monkeypatch):
+        """The load-bearing test.
+
+        load_pdf is replaced with something that raises, so if chunking still
+        touched the PDF the job would fail. Asserting only that chunking
+        *succeeds* would pass whether or not the cache is used -- making the
+        parser explode is what distinguishes "read the cache" from "happened to
+        work anyway".
+        """
+        self.upload(client, structured_pdf)
+
+        def must_not_be_called(_path):
+            raise AssertionError("chunking re-parsed the PDF instead of using the cache")
+
+        monkeypatch.setattr(main_module, "load_pdf", must_not_be_called)
+
+        status = self.run_chunking(client)
+
+        assert status["status"] == "done", status["error"]
+        assert any(event["type"] == "chunk" for event in status["events"])
+
+    def test_the_cache_holds_cleaned_text_not_raw_extraction(self, client, structured_pdf):
+        # Caching the *raw* extraction would quietly undo step 1: the room is
+        # shown a boilerplate-removal count, then chunks that still contain the
+        # boilerplate. The repeated footer must be gone, the body must remain.
+        self.upload(client, structured_pdf)
+        cached = self.cache_path(client).read_text(encoding="utf-8")
+        assert "Internal Handbook -- Confidential" not in cached
+        assert "Companies are the top level record in the system." in cached
+
+    def test_chunking_falls_back_to_reparsing_when_the_cache_is_absent(
+        self, client, structured_pdf
+    ):
+        # app-data survives image rebuilds, so a session persisted before this
+        # cache existed can still be rehydrated. That must degrade to a
+        # re-parse, not 500.
+        self.upload(client, structured_pdf)
+        self.cache_path(client).unlink()
+
+        status = self.run_chunking(client)
+
+        assert status["status"] == "done", status["error"]
+        assert any(event["type"] == "chunk" for event in status["events"])
+
+    def test_a_new_upload_replaces_the_cached_text(self, client, structured_pdf, flat_pdf):
+        # Otherwise the second document would be chunked using the first
+        # document's text -- the most misleading failure this page could have.
+        self.upload(client, structured_pdf)
+        with open(flat_pdf, "rb") as handle:
+            client.post(
+                "/api/upload",
+                files={"file": ("flat.pdf", handle.read(), "application/pdf")},
+            )
+        cached = self.cache_path(client).read_text(encoding="utf-8")
+        assert "The quick brown fox" in cached
+        assert "Companies are the top level record in the system." not in cached
+
+
 class TestCollectionAndReset:
     def test_the_collection_reads_empty(self, client):
         body = client.get("/api/collection").json()

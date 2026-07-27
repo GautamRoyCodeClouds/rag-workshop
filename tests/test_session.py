@@ -293,6 +293,37 @@ class TestUploadedFileCleanup:
         assert fresh.unlocked_step() == 1
 
 
+class TestCleanedTextCache:
+    def test_the_cache_lives_beside_the_uploaded_document(self, tmp_path):
+        # Placing it inside uploads/<session_id>/ is what makes reset() delete
+        # it for free: the cached text of a confidential document is a copy of
+        # that document, and it must not outlive the PDF it came from.
+        store = make_store(tmp_path)
+        state = store.get_or_create(None)
+        assert store.text_cache_path(state.session_id).parent == store.uploads_dir(
+            state.session_id
+        )
+
+    def test_reset_deletes_the_cached_text(self, tmp_path):
+        store = make_store(tmp_path)
+        state = store.get_or_create(None)
+        cache = store.text_cache_path(state.session_id)
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text("confidential document text", encoding="utf-8")
+        store.save(state)
+
+        store.reset(state.session_id)
+
+        assert not cache.exists()
+
+    def test_the_cache_path_is_rejected_for_a_malformed_session_id(self, tmp_path):
+        # Inherits uploads_dir's guard rather than building a path of its own,
+        # so a crafted id cannot place or read a file outside the volume.
+        store = make_store(tmp_path)
+        with pytest.raises(ValueError):
+            store.text_cache_path("../escape")
+
+
 class TestClientView:
     def test_to_json_excludes_chunk_bodies(self, tmp_path):
         """The client gets counts and metadata, not 423 chunk bodies twice."""

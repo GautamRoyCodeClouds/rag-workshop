@@ -78,6 +78,29 @@ async def _collection():
         ) from exc
 
 
+def _document_text(state) -> str:
+    """The cleaned text to chunk.
+
+    Read from the cache written at upload time. Re-parsing here instead would
+    redo the most expensive step in the pipeline on every strategy change:
+    measured at 0.60s for load_pdf on a structurally simple 270-page PDF -- and
+    materially worse on a real one, where layout, not character count, drives
+    pypdf's cost -- against 0.01-0.43s for the chunking itself. The presenter
+    compares all five strategies live, so that was paid on every comparison.
+
+    It also makes the pipeline stages honest. The deck teaches load -> clean ->
+    chunk as distinct steps; re-parsing here quietly re-ran the first two inside
+    the third.
+
+    Falls back to re-parsing when the cache is absent: app-data survives image
+    rebuilds, so a session persisted before this cache existed must still work.
+    """
+    cache = store.text_cache_path(state.session_id)
+    if cache.is_file():
+        return cache.read_text(encoding="utf-8")
+    return load_pdf(state.pdf_path).text
+
+
 def _superseded() -> HTTPException:
     return HTTPException(status_code=409, detail="Superseded by a newer session action.")
 
@@ -167,6 +190,15 @@ def _apply_ingest(state, path: Path, display_name: str, result) -> None:
     state.chunking = None
     state.embedding = None
     state.chunks = []
+
+    # Cache the cleaned text so comparing chunking strategies does not re-parse
+    # the document each time -- see _document_text for the measured cost. Not
+    # wrapped in try/except: the uploads directory was just written to, so a
+    # failure here means the data volume is broken and the upload should say so
+    # rather than silently degrade every later chunk run.
+    cache = store.text_cache_path(state.session_id)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(result.text, encoding="utf-8")
 
 
 async def _ingest_path(state, path: Path, display_name: str) -> dict:
@@ -292,7 +324,7 @@ async def start_chunking(request: Request) -> Response:
     async def run() -> None:
         try:
             registry.publish(job, {"type": "stage", "message": f"Splitting with {strategy}..."})
-            text = (await asyncio.to_thread(load_pdf, state.pdf_path)).text
+            text = await asyncio.to_thread(_document_text, state)
             embeddings = await asyncio.to_thread(build_embeddings) if strategy == "semantic" else None
             result = await asyncio.to_thread(
                 chunk,
