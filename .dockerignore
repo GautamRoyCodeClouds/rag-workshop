@@ -1,0 +1,17 @@
+# No PDF may enter the build context -- the presenter's document is internal
+# and must never end up in an image layer.
+*.pdf
+
+.git/
+.gitignore
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+data/
+docs/
+.impeccable/
+docker-compose.override.yml
+rag-workshop.html

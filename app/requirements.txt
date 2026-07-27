@@ -1,0 +1,18 @@
+# Bounded rather than exactly pinned: the versions that resolve at build time
+# are frozen into requirements.lock.txt in Step 9 for reproducibility.
+fastapi>=0.115,<0.116
+uvicorn[standard]>=0.34,<0.35
+jinja2>=3.1,<4
+python-multipart>=0.0.20,<0.1
+
+# LangChain: PDF loader, the five splitters, and the embedding wrapper.
+langchain-community>=0.3.14,<0.4
+langchain-text-splitters>=0.3.5,<0.4
+langchain-huggingface>=0.1.2,<0.2
+langchain-experimental>=0.3.4,<0.4
+
+# Embeddings + vector store
+sentence-transformers>=3.3,<4
+chromadb>=0.6,<0.7
+pypdf>=5.1,<6
+numpy>=1.26,<3

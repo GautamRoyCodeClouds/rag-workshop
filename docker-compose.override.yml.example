@@ -1,0 +1,12 @@
+# Presenter-only. Copy to docker-compose.override.yml (gitignored) and point it
+# at a local PDF. Compose merges override files automatically, and their absence
+# is not an error -- so attendees are unaffected.
+#
+# The mount is read-only, and the document is NEVER copied into the image:
+# baking it into a layer would leak it on any image push or share.
+services:
+  app:
+    volumes:
+      - ./your-document.pdf:/srv/samples/local.pdf:ro
+    environment:
+      LOCAL_PDF_PATH: /srv/samples/local.pdf

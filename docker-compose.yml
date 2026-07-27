@@ -13,12 +13,34 @@ services:
       PERSIST_DIRECTORY: /data
       ANONYMIZED_TELEMETRY: "FALSE"
     healthcheck:
-      # The image is slim (no curl), so probe the port with bash's /dev/tcp
-      test: ["CMD", "/bin/bash", "-c", "cat < /dev/null > /dev/tcp/localhost:8000"]
+      # The image is slim (no curl), so probe the port with bash's /dev/tcp.
+      # Use 127.0.0.1, not localhost: chroma binds IPv4 only, but glibc's
+      # resolver here prefers the ::1 AAAA record for "localhost", so the
+      # IPv6-first lookup would always connection-refuse.
+      test: ["CMD", "/bin/bash", "-c", "cat < /dev/null > /dev/tcp/127.0.0.1/8000"]
       interval: 30s
       timeout: 10s
       retries: 5
       start_period: 20s
 
+  app:
+    build:
+      context: .
+      dockerfile: app/Dockerfile
+    container_name: rag-app
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - app-data:/data
+    environment:
+      CHROMA_HOST: chromadb
+      CHROMA_PORT: "8000"
+      DATA_DIR: /data
+    depends_on:
+      chromadb:
+        condition: service_healthy
+
 volumes:
   chroma-data:
+  app-data:
