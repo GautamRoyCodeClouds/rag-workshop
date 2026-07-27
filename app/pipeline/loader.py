@@ -27,9 +27,17 @@ from langchain_community.document_loaders import PyPDFLoader
 # word in the middle as far as a tokeniser is concerned.
 _INVISIBLE_RE = re.compile("[​‌‍﻿]")
 
-# A table-of-contents line: text, a run of dots or spaces, then a trailing page
+# A table-of-contents line: text, then a genuine leader, then a trailing page
 # number. "Companies Management .......... 16"
-_TOC_LINE_RE = re.compile(r"^\s*\S.*?[\s.…]{2,}\d{1,4}\s*$")
+#
+# The leader must be a real one -- either a run of 3+ dots (optionally spaced
+# out, "Introduction . . . . . 12") or a single ellipsis character, or, for
+# leaderless columnar layouts, a substantially wide whitespace gap (6+
+# characters). Two whitespace-or-dot characters is NOT enough: ordinary prose
+# routinely ends a line in a sentence-final period plus a couple of spaces
+# plus a number ("All rights reserved.  2024") or a label with a couple of
+# aligning spaces ("Room number:   204"), and neither is a TOC entry.
+_TOC_LINE_RE = re.compile(r"^\s*\S.*?(?:(?:\.[ \t]*){3,}|…+|[ \t]{6,})\d{1,4}\s*$")
 
 # Lines this long are prose, not running headers, whatever their frequency.
 _MAX_BOILERPLATE_LEN = 120
@@ -39,6 +47,13 @@ _MIN_PAGES_FOR_BOILERPLATE = 4
 
 # Fraction of pages a line must appear on before it counts as boilerplate.
 _BOILERPLATE_PAGE_FRACTION = 0.5
+
+# Running headers and footers live within this many lines of the top or bottom
+# of a page. A line recurring across most pages but sitting in the middle of
+# the body (a repeated "Notes:" subheading, a recurring disclaimer) is content,
+# not boilerplate, however often it repeats -- frequency alone cannot tell the
+# two apart, only position can.
+_BOILERPLATE_EDGE_LINES = 3
 
 # Only strip TOC lines from the front, where a TOC actually lives. A mid-document
 # line that happens to end in a number is probably data.
@@ -84,23 +99,42 @@ class LoadResult:
         if not self.page_offsets:
             return 1
         starts = [start for start, _ in self.page_offsets]
+        # bisect_right, not bisect_left: an offset equal to a page's recorded
+        # start must resolve to *that* page, not the one before it. bisect_left
+        # would put the insertion point before equal entries, and subtracting 1
+        # would then land one page too early for any offset sitting exactly on
+        # a boundary.
         index = max(bisect.bisect_right(starts, offset) - 1, 0)
         return self.page_offsets[index][1]
 
 
 def _find_boilerplate(pages: list[str]) -> set[str]:
-    """Lines recurring across most pages -- running headers and footers."""
+    """Lines recurring across most pages, near the top or bottom -- running
+    headers and footers.
+
+    Frequency alone is not enough: a legitimate line can recur on every page
+    just as easily as a footer can (a repeated subheading, a standard
+    disclaimer paragraph). What actually marks a line as a running header or
+    footer is *where* it sits -- within a few lines of the top or bottom of the
+    page -- so only those lines are eligible to count, however often a
+    mid-page line repeats.
+    """
     if len(pages) < _MIN_PAGES_FOR_BOILERPLATE:
         return set()
 
     counts: Counter[str] = Counter()
     for page in pages:
-        # Count each distinct line once per page, so a line repeated many times
-        # on a single page does not masquerade as a running header.
+        lines = page.splitlines()
+        edge_count = min(_BOILERPLATE_EDGE_LINES, len(lines))
+        edge_indexes = set(range(edge_count)) | set(
+            range(len(lines) - edge_count, len(lines))
+        )
+        # Count each distinct edge line once per page, so a line repeated many
+        # times on a single page does not masquerade as a running header.
         counts.update({
-            line.strip()
-            for line in page.splitlines()
-            if line.strip() and len(line.strip()) <= _MAX_BOILERPLATE_LEN
+            lines[i].strip()
+            for i in edge_indexes
+            if lines[i].strip() and len(lines[i].strip()) <= _MAX_BOILERPLATE_LEN
         })
 
     threshold = len(pages) * _BOILERPLATE_PAGE_FRACTION
@@ -149,6 +183,41 @@ def clean_pages(raw_pages: list[str]) -> CleanResult:
     )
 
 
+def _join_pages(pages: list[str]) -> tuple[str, list[tuple[int, int]]]:
+    """Concatenate cleaned pages into one string, with a correct offset per page.
+
+    A naive `separator.join(parts).strip()` looks harmless but is not: when a
+    leading page cleans to "" (a logo-only cover, an all-boilerplate title
+    page -- entirely realistic), the joined string *starts* with the separator
+    itself ("\\n\\n..."), and .strip() eats it. That shifts every later page's
+    real start left by the stripped amount, while offsets recorded during the
+    join assumed the separator was still there -- a silent, systematic drift
+    that only gets worse the more leading pages are empty. One empty leading
+    page is already enough to make every citation in the document point one
+    page too early.
+
+    Rather than assume the drift is zero, this measures exactly how much
+    leading whitespace .strip() removes and subtracts that same amount from
+    every recorded offset, so the two are correct by construction instead of
+    by coincidence. Trailing whitespace needs no such correction: stripping the
+    *end* of the string cannot move anything that comes before it.
+    """
+    separator = "\n\n"
+    parts: list[str] = []
+    offsets: list[tuple[int, int]] = []
+    cursor = 0
+    for page_index, page in enumerate(pages):
+        offsets.append((cursor, page_index + 1))
+        parts.append(page)
+        cursor += len(page) + len(separator)
+
+    joined = separator.join(parts)
+    text = joined.strip()
+    leading_trim = len(joined) - len(joined.lstrip())
+    offsets = [(max(0, start - leading_trim), page_num) for start, page_num in offsets]
+    return text, offsets
+
+
 def load_pdf(path: str | Path) -> LoadResult:
     """Extract and clean a PDF, returning text plus everything the UI reports."""
     documents = PyPDFLoader(str(path)).load()
@@ -159,16 +228,7 @@ def load_pdf(path: str | Path) -> LoadResult:
 
     # Assemble one string, recording where each page starts so chunks produced
     # downstream can be attributed back to a page number.
-    separator = "\n\n"
-    parts: list[str] = []
-    offsets: list[tuple[int, int]] = []
-    cursor = 0
-    for page_index, page in enumerate(cleaned.pages):
-        offsets.append((cursor, page_index + 1))
-        parts.append(page)
-        cursor += len(page) + len(separator)
-
-    text = separator.join(parts).strip()
+    text, offsets = _join_pages(cleaned.pages)
     if not text:
         raise EmptyDocumentError(
             f"0 characters extracted from {Path(path).name}. This looks like a "

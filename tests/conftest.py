@@ -86,6 +86,51 @@ def flat_pdf(tmp_path_factory) -> str:
 
 
 @pytest.fixture
+def toc_near_miss_pages() -> list[str]:
+    """A leading page mixing a genuine TOC entry with two lines that only look
+    like one.
+
+    "All rights reserved.  2024" and "Room number:   204" both end in a run of
+    1-4 digits preceded by nothing more than a couple of whitespace
+    characters -- exactly what a too-loose TOC regex keys on. Neither is a
+    table-of-contents entry; a real one needs an actual leader (a genuine
+    dot-leader, or a much wider gap than two characters).
+    """
+    return [
+        "Sample Handbook\n"
+        "Companies Management .................. 3\n"
+        "All rights reserved.  2024\n"
+        "Room number:   204"
+    ]
+
+
+@pytest.fixture
+def mid_page_boilerplate_pages() -> list[str]:
+    """Four pages sharing a repeated footer *and* a repeated mid-page line.
+
+    Frequency alone cannot tell these apart -- "Notes:" and the footer both
+    recur on every page. Position can: a running header or footer lives within
+    a few lines of the top or bottom of the page, while "Notes:" sits in the
+    middle of the body, where a recurring subheading or disclaimer would.
+    """
+    return [
+        f"Header info page {n}\n"
+        f"More header page {n}\n"
+        f"Even more header page {n}\n"
+        f"Some unique body about page {n}.\n"
+        "Notes:\n"
+        f"Another unique body line about page {n}.\n"
+        f"Body filler A page {n}\n"
+        f"Body filler B page {n}\n"
+        f"Body filler C page {n}\n"
+        f"Footer line one page {n}\n"
+        f"Footer line two page {n}\n"
+        "Repeated Footer Text"
+        for n in range(1, 5)
+    ]
+
+
+@pytest.fixture
 def dirty_pages() -> list[str]:
     """Raw page text as an extractor hands it over, including U+200B.
 
