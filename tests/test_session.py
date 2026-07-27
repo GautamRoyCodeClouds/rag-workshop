@@ -165,6 +165,27 @@ class TestPersistence:
         fresh = make_store(tmp_path).get_or_create(state.session_id)
         assert fresh.unlocked_step() == 1
 
+    @pytest.mark.parametrize("persisted_id", ["differentvalidid", "../../invalid"])
+    def test_rehydration_rejects_a_persisted_id_that_does_not_match_its_filename(
+        self, tmp_path, persisted_id
+    ):
+        store = make_store(tmp_path)
+        requested_id = "requestedvalidid"
+        store._path(requested_id).write_text(
+            json.dumps(
+                {
+                    "session_id": persisted_id,
+                    "created_at": "2020-01-01T00:00:00+00:00",
+                    "upload": {"filename": "leaked.pdf"},
+                }
+            )
+        )
+
+        fresh = make_store(tmp_path).get_or_create(requested_id)
+
+        assert fresh.session_id not in {requested_id, persisted_id}
+        assert fresh.upload is None
+
     def test_malformed_session_id_is_rejected_not_swapped(self, tmp_path):
         """The .isalnum() guard in _path has to actually run: if it were
         deleted, get_or_create would silently hand back a session under a

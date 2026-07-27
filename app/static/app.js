@@ -3,6 +3,8 @@
 
 const $ = (id) => document.getElementById(id);
 const state = { unlocked: 1, strategy: null, chunkCount: 0, offset: 0, limit: 25 };
+let operationGeneration = 0;
+const activeFollowers = new Set();
 
 function setText(id, value) { $(id).textContent = value; }
 function clear(element) { element.replaceChildren(); }
@@ -29,19 +31,32 @@ function applyUnlock(step) {
 
 function applyTerminal(session) { if (session && session.unlocked_step) applyUnlock(session.unlocked_step); }
 
+function beginOperation() {
+  operationGeneration += 1;
+  activeFollowers.forEach((cancel) => cancel());
+  activeFollowers.clear();
+  $('run-chunk').disabled = false;
+  $('run-embed').disabled = false;
+  return operationGeneration;
+}
+
 /* Every event has a server monotonic id. The shared cursor makes SSE loss and
    polling handoff exact-once, rather than replaying visible chunks. */
-function follow(jobId, onEvent, onDone) {
+function follow(jobId, onEvent, onDone, generation = operationGeneration) {
   let cursor = 0; let settled = false; let source = null;
+  const current = () => generation === operationGeneration;
+  const cancel = () => { settled = true; if (source) source.close(); };
+  activeFollowers.add(cancel);
   const consume = (event, id) => {
+    if (!current() || settled) return;
     const eventId = Number(id || event.id || 0);
     if (eventId && eventId <= cursor) return;
     if (eventId) cursor = eventId;
     onEvent(event);
   };
-  const finish = (error = '', session = null) => { if (settled) return; settled = true; if (source) source.close(); onDone(error, session); };
+  const finish = (error = '', session = null) => { if (settled || !current()) return; settled = true; activeFollowers.delete(cancel); if (source) source.close(); onDone(error, session); };
   const poll = async () => {
-    while (!settled) {
+    while (!settled && current()) {
       let status;
       try { status = await api(`/api/status/${jobId}?after=${cursor}`); } catch (error) { finish(error.message); return; }
       status.events.forEach((event) => consume(event, event.id));
@@ -68,7 +83,30 @@ function renderUpload(upload) {
   const removed = upload.boilerplate_lines_removed; const invisible = upload.invisible_chars_removed; const note = $('clean-note'); note.hidden = !(removed || invisible);
   if (!note.hidden) note.textContent = `Cleaned before embedding: removed ${removed} boilerplate lines and stripped ${invisible} invisible characters. Raw junk embeds perfectly well and pollutes results.`;
 }
-async function loadDocument(request) { banner(); try { const body = await request(); renderUpload(body.upload); applyUnlock(body.unlocked_step); } catch (error) { banner(error.message); } }
+
+function resetEmbeddingView() {
+  state.offset = 0;
+  clear($('records')); addText($('records'), 'p', 'Stored vectors will appear here.', 'empty');
+  $('embed-bar').style.width = '0%'; $('embed-progress').setAttribute('aria-valuenow', '0');
+  setText('embed-status', ''); setText('record-count', '');
+}
+
+function resetDownstreamView() {
+  state.chunkCount = 0;
+  clear($('chunk-preview')); addText($('chunk-preview'), 'p', 'Chunks will appear here as the document is split.', 'empty');
+  clear($('chunk-notes')); $('chunk-notes').hidden = true;
+  setText('chunk-count', '');
+  resetEmbeddingView();
+}
+
+async function loadDocument(request) {
+  banner(); const generation = beginOperation();
+  try {
+    const body = await request();
+    if (generation !== operationGeneration) return;
+    resetDownstreamView(); renderUpload(body.upload); applyUnlock(body.unlocked_step);
+  } catch (error) { if (generation === operationGeneration) banner(error.message); }
+}
 function uploadFile(file) { const form = new FormData(); form.append('file', file); return loadDocument(() => api('/api/upload', { method: 'POST', body: form })); }
 $('pick').onclick = () => $('file').click(); $('file').onchange = (event) => { if (event.target.files[0]) uploadFile(event.target.files[0]); };
 const drop = $('drop'); drop.addEventListener('dragover', (event) => { event.preventDefault(); drop.classList.add('over'); }); drop.addEventListener('dragleave', () => drop.classList.remove('over')); drop.addEventListener('drop', (event) => { event.preventDefault(); drop.classList.remove('over'); if (event.dataTransfer.files[0]) uploadFile(event.dataTransfer.files[0]); });
@@ -86,21 +124,22 @@ document.querySelectorAll('.strategy').forEach((button) => { button.onclick = ()
 
 function renderChunk(event) { const preview = $('chunk-preview'); if (state.chunkCount === 0) clear(preview); const item = document.createElement('article'); item.className = 'chunk'; const meta = document.createElement('div'); meta.className = 'chunk-meta'; [`#${event.index}`, `${event.char_count} chars`, `page ${event.page}`, event.parent_id ? `parent ${event.parent_id}` : ''].filter(Boolean).forEach((value) => addText(meta, 'span', value)); item.appendChild(meta); addText(item, 'div', event.text, 'chunk-text'); preview.appendChild(item); }
 $('run-chunk').onclick = async () => {
-  banner(); const button = $('run-chunk'); button.disabled = true; clear($('chunk-preview')); $('chunk-notes').hidden = true; clear($('chunk-notes')); state.chunkCount = 0; const notes = [];
+  banner(); const generation = beginOperation(); const button = $('run-chunk'); button.disabled = true; clear($('chunk-preview')); $('chunk-notes').hidden = true; clear($('chunk-notes')); state.chunkCount = 0; const notes = [];
   try { const { job_id: jobId } = await api('/api/chunk', { method:'POST', headers:{ 'Content-Type':'application/json' }, body:JSON.stringify({ strategy:state.strategy, size:Number($('size').value), overlap:Number($('overlap').value), percentile:Number($('percentile').value) }) });
-    follow(jobId, (event) => { if (event.type === 'chunk') { state.chunkCount += 1; renderChunk(event); setText('chunk-count', `${state.chunkCount} chunks`); } else if (event.type === 'note') notes.push(event.message); else if (event.type === 'stage') setText('chunk-count', event.message); }, (error, session) => { button.disabled = false; if (error) { banner(error); return; } if (notes.length) { $('chunk-notes').hidden = false; notes.forEach((note) => addText($('chunk-notes'), 'div', note)); } setText('chunk-count', `${state.chunkCount} chunks`); applyTerminal(session); });
-  } catch (error) { button.disabled = false; banner(error.message); }
+    if (generation !== operationGeneration) return;
+    follow(jobId, (event) => { if (event.type === 'chunk') { state.chunkCount += 1; renderChunk(event); setText('chunk-count', `${state.chunkCount} chunks`); } else if (event.type === 'note') notes.push(event.message); else if (event.type === 'stage') setText('chunk-count', event.message); }, (error, session) => { button.disabled = false; if (error) { banner(error); return; } resetEmbeddingView(); if (notes.length) { $('chunk-notes').hidden = false; notes.forEach((note) => addText($('chunk-notes'), 'div', note)); } setText('chunk-count', `${state.chunkCount} chunks`); applyTerminal(session); }, generation);
+  } catch (error) { if (generation === operationGeneration) { button.disabled = false; banner(error.message); } }
 };
 
 $('run-embed').onclick = async () => {
-  banner(); const button = $('run-embed'); button.disabled = true; const started = Date.now();
-  try { const { job_id: jobId } = await api('/api/embed', { method:'POST' }); follow(jobId, (event) => { if (event.type === 'embedded') { const pct = Math.round((event.done / event.total) * 100); $('embed-bar').style.width = `${pct}%`; setText('embed-status', `${event.done} / ${event.total} chunks embedded · ${((Date.now() - started) / 1000).toFixed(1)}s`); } else if (event.type === 'stage') setText('embed-status', event.message); else if (event.type === 'summary') setText('embed-status', `${event.vectors_written} vectors written to ChromaDB`); }, async (error, session) => { button.disabled = false; if (error) { banner(error); return; } $('embed-bar').style.width = '100%'; applyTerminal(session); state.offset = 0; await loadRecords(); });
-  } catch (error) { button.disabled = false; banner(error.message); }
+  banner(); const generation = beginOperation(); const button = $('run-embed'); button.disabled = true; const started = Date.now(); $('embed-bar').style.width = '0%'; $('embed-progress').setAttribute('aria-valuenow', '0');
+  try { const { job_id: jobId } = await api('/api/embed', { method:'POST' }); if (generation !== operationGeneration) return; follow(jobId, (event) => { if (event.type === 'embedded') { const pct = Math.round((event.done / event.total) * 100); $('embed-bar').style.width = `${pct}%`; $('embed-progress').setAttribute('aria-valuenow', String(pct)); setText('embed-status', `${event.done} / ${event.total} chunks embedded · ${((Date.now() - started) / 1000).toFixed(1)}s`); } else if (event.type === 'stage') setText('embed-status', event.message); else if (event.type === 'summary') setText('embed-status', `${event.vectors_written} vectors written to ChromaDB`); }, async (error, session) => { button.disabled = false; if (error) { banner(error); return; } $('embed-bar').style.width = '100%'; $('embed-progress').setAttribute('aria-valuenow', '100'); applyTerminal(session); state.offset = 0; await loadRecords(); }, generation);
+  } catch (error) { if (generation === operationGeneration) { button.disabled = false; banner(error.message); } }
 };
 
 function renderRecord(record) { const item = document.createElement('article'); item.className = 'record'; addText(item, 'div', record.id, 'record-id'); addText(item, 'div', record.text, 'chunk-text'); addText(item, 'div', `[${record.vector_preview.join(', ')}, …] ${record.dims} dims · norm ${record.vector_norm}`, 'record-vec'); const details = document.createElement('details'); addText(details, 'summary', 'metadata'); addText(details, 'pre', JSON.stringify(record.metadata, null, 2)); item.appendChild(details); return item; }
-async function loadRecords() { try { const page = await api(`/api/collection?offset=${state.offset}&limit=${state.limit}`); setText('record-count', page.total ? `${page.total} records · showing ${page.offset + 1}-${page.offset + page.records.length}` : '0 records'); const records = $('records'); clear(records); if (!page.records.length) addText(records, 'p', 'No records in this collection.', 'empty'); else page.records.forEach((record) => records.appendChild(renderRecord(record))); $('prev-page').disabled = page.offset === 0; $('next-page').disabled = page.offset + page.records.length >= page.total; } catch (error) { banner(error.message); } }
+async function loadRecords(generation = operationGeneration) { try { const page = await api(`/api/collection?offset=${state.offset}&limit=${state.limit}`); if (generation !== operationGeneration) return; setText('record-count', page.total ? `${page.total} records · showing ${page.offset + 1}-${page.offset + page.records.length}` : '0 records'); const records = $('records'); clear(records); if (!page.records.length) addText(records, 'p', 'No records in this collection.', 'empty'); else page.records.forEach((record) => records.appendChild(renderRecord(record))); $('prev-page').disabled = page.offset === 0; $('next-page').disabled = page.offset + page.records.length >= page.total; } catch (error) { if (generation === operationGeneration) banner(error.message); } }
 $('prev-page').onclick = () => { state.offset = Math.max(0, state.offset - state.limit); loadRecords(); }; $('next-page').onclick = () => { state.offset += state.limit; loadRecords(); };
-$('reset').onclick = async () => { if (!confirm('Clear this session and drop the ChromaDB collection?')) return; banner(); try { const body = await api('/api/reset', { method:'POST', headers:{ 'Content-Type':'application/json' }, body:JSON.stringify({ drop_collection:true }) }); clear($('chunk-preview')); addText($('chunk-preview'), 'p', 'Chunks will appear here as the document is split.', 'empty'); clear($('records')); addText($('records'), 'p', 'Stored vectors will appear here.', 'empty'); $('upload-stats').hidden = true; $('clean-note').hidden = true; $('embed-bar').style.width = '0'; setText('embed-status', ''); setText('chunk-count', ''); setText('record-count', ''); applyUnlock(body.unlocked_step); } catch (error) { banner(error.message); } };
+$('reset').onclick = async () => { if (!confirm('Clear this session and drop the ChromaDB collection?')) return; banner(); const generation = beginOperation(); try { const body = await api('/api/reset', { method:'POST', headers:{ 'Content-Type':'application/json' }, body:JSON.stringify({ drop_collection:true }) }); if (generation !== operationGeneration) return; resetDownstreamView(); $('upload-stats').hidden = true; $('clean-note').hidden = true; applyUnlock(body.unlocked_step); } catch (error) { if (generation === operationGeneration) banner(error.message); } };
 
 (function init() { const served = window.__STATE__ || {}; selectStrategy(document.querySelector('.strategy[aria-pressed="true"]')); if (served.upload) renderUpload(served.upload); applyUnlock(served.unlocked_step || 1); if ((served.unlocked_step || 1) >= 5) loadRecords(); }());

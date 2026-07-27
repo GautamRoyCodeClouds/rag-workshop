@@ -37,6 +37,7 @@ class JobRegistry:
         self._loops: dict[str, asyncio.AbstractEventLoop | None] = {}
         self._subscribers: dict[str, list[asyncio.Queue[dict | None]]] = {}
         self._generations: dict[str, int] = {}
+        self._session_locks: dict[str, asyncio.Lock] = {}
         self._lock = threading.RLock()
         self._default_loop = loop
         self._owner_thread = threading.get_ident()
@@ -53,6 +54,22 @@ class JobRegistry:
             self._loops[job.job_id] = loop
             self._subscribers[job.job_id] = []
         return job
+
+    def session_lock(self, session_id: str) -> asyncio.Lock:
+        """The short commit lock shared by every mutation for one session."""
+        with self._lock:
+            return self._session_locks.setdefault(session_id, asyncio.Lock())
+
+    async def claim_session(self, session_id: str) -> int:
+        """Invalidate older work and return the generation owned by this action."""
+        async with self.session_lock(session_id):
+            self.invalidate_session(session_id)
+            with self._lock:
+                return self._generations[session_id]
+
+    def generation_is_current(self, session_id: str, generation: int) -> bool:
+        with self._lock:
+            return generation == self._generations.get(session_id, 0)
 
     def get(self, job_id: str) -> Job | None:
         with self._lock:

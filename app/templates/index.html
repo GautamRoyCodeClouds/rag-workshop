@@ -64,7 +64,7 @@
       <div class="step-body">
         <p class="muted"> <span class="mono">{{ settings.embed_model }}</span> · {{ settings.embed_dims }} dimensions · normalised, so cosine is a dot product. Runs on CPU, in this container, with no network.</p>
         <div class="ctl"><button type="button" class="pri" id="run-embed">Start embedding</button></div>
-        <div class="bar" aria-label="Embedding progress"><i id="embed-bar"></i></div><div class="muted mono" id="embed-status" aria-live="polite"></div>
+        <div class="bar" id="embed-progress" role="progressbar" aria-label="Embedding progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="embed-bar"></i></div><div class="muted mono" id="embed-status" aria-live="polite"></div>
       </div>
     </section>
 

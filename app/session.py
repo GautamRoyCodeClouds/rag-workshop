@@ -154,7 +154,9 @@ class SessionStore:
             if path.is_file():
                 try:
                     state = SessionState.from_json(json.loads(path.read_text()))
-                except (json.JSONDecodeError, KeyError, TypeError):
+                    if state.session_id != session_id or not state.session_id.isalnum():
+                        raise ValueError("Persisted session id does not match its filename.")
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError):
                     # app-data is a named volume that survives image rebuilds,
                     # so a session file written under an older schema (a
                     # renamed field, Chunk gaining/losing one) can still be on
@@ -164,7 +166,7 @@ class SessionStore:
                     # manually clears the volume mid-workshop.
                     pass
                 else:
-                    self._live[state.session_id] = state
+                    self._live[session_id] = state
                     return state
 
         state = SessionState(session_id=uuid.uuid4().hex, created_at=_now_iso())

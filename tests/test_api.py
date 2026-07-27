@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
+import subprocess
 import threading
 import time
 from dataclasses import replace
+from pathlib import Path
 
 import chromadb
 import pytest
@@ -112,6 +115,169 @@ class TestPage:
 
     def test_config_reports_whether_a_local_document_exists(self, client):
         assert client.get("/api/config").json()["has_local_pdf"] is False
+
+    def test_embedding_progress_exposes_accessible_range_semantics(self, client):
+        body = client.get("/").text
+        assert (
+            'id="embed-progress" role="progressbar" aria-label="Embedding progress" '
+            'aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"'
+        ) in body
+
+    def test_new_document_reset_and_stale_follow_suppression_run_in_the_client(self):
+        """Execute the real browser script with a minimal DOM.
+
+        This catches removal of the operation epoch or downstream reset by
+        observing their effects, without pinning either helper's source text.
+        """
+        script_path = Path(main_module.BASE_DIR) / "static" / "app.js"
+        if shutil.which("node") is None:
+            pytest.skip("Node.js is not installed in the Python app image.")
+        harness = r"""
+const fs = require('fs');
+const vm = require('vm');
+class Element {
+  constructor(id = '') {
+    this.id = id; this.children = []; this.dataset = {}; this.style = {};
+    this.hidden = false; this.disabled = false; this.value = '0';
+    this.attributes = {}; this.classList = { add() {}, remove() {} };
+  }
+  replaceChildren(...items) { this.children = items; }
+  appendChild(item) { this.children.push(item); return item; }
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+  getAttribute(name) { return this.attributes[name]; }
+  toggleAttribute(name, enabled) { this.attributes[name] = String(enabled); }
+  addEventListener() {}
+}
+const elements = new Map();
+const get = (id) => {
+  if (!elements.has(id)) elements.set(id, new Element(id));
+  return elements.get(id);
+};
+const strategy = new Element('recursive');
+strategy.dataset = { key:'recursive', usesSize:'true', usesOverlap:'true', extra:'' };
+strategy.setAttribute('aria-pressed', 'true');
+const sources = [];
+let collectionResolve = null;
+class FakeEventSource {
+  constructor(url) { this.url = url; this.closed = false; sources.push(this); }
+  close() { this.closed = true; }
+}
+const context = {
+  console, setTimeout, clearTimeout, EventSource: FakeEventSource, Element,
+  FormData: class { append() {} },
+  fetch: async (url) => {
+    if (url.startsWith('/api/collection')) {
+      return new Promise((resolve) => { collectionResolve = resolve; });
+    }
+    return { ok:true, json:async () => ({ job_id:'embed-job' }) };
+  },
+  confirm: () => true,
+  window: { __STATE__: { unlocked_step:1 } },
+  document: {
+    getElementById: get,
+    createElement: () => new Element(),
+    querySelector: () => strategy,
+    querySelectorAll: () => [strategy],
+  },
+};
+vm.createContext(context);
+vm.runInContext(fs.readFileSync(process.argv[1], 'utf8'), context);
+vm.runInContext(`
+  state.chunkCount = 4; state.offset = 50;
+  $('chunk-preview').appendChild(new Element('old-chunk'));
+  $('chunk-notes').appendChild(new Element('old-note'));
+  $('records').appendChild(new Element('old-record'));
+  $('embed-progress').setAttribute('aria-valuenow', '76');
+  $('embed-bar').style.width = '76%';
+  $('chunk-count').textContent = '4 chunks';
+  $('record-count').textContent = '4 records';
+  loadRecords();
+`, context);
+vm.runInContext(`
+  loadDocument(() => Promise.resolve({
+    upload: {
+      page_count:1, char_count:10, pages_without_text:0,
+      boilerplate_lines_removed:0, invisible_chars_removed:0
+    },
+    unlocked_step:2
+  }))
+`, context);
+setImmediate(() => {
+  const preview = get('chunk-preview');
+  if (preview.children.length !== 1 || preview.children[0].textContent !== 'Chunks will appear here as the document is split.') process.exit(10);
+  if (get('records').children.length !== 1 || get('records').children[0].textContent !== 'Stored vectors will appear here.') process.exit(11);
+  if (get('embed-progress').getAttribute('aria-valuenow') !== '0') process.exit(12);
+  if (get('embed-bar').style.width !== '0%') process.exit(13);
+  if (get('chunk-count').textContent !== '' || get('record-count').textContent !== '') process.exit(14);
+
+  vm.runInContext(`
+    staleEvents = 0;
+    const token = beginOperation();
+    follow('old-job', () => { staleEvents += 1; }, () => {}, token);
+    beginOperation();
+  `, context);
+  sources[0].onmessage({ data:'{"type":"chunk","index":0}', lastEventId:'1' });
+  if (vm.runInContext('staleEvents', context) !== 0) process.exit(15);
+
+  collectionResolve({
+    ok:true,
+    json:async () => ({
+      total:1, offset:0,
+      records:[{id:'stale', text:'stale record', vector_preview:[1], dims:1, vector_norm:1, metadata:{}}]
+    })
+  });
+  setImmediate(() => {
+    if (get('records').children.length !== 1 || get('records').children[0].textContent !== 'Stored vectors will appear here.') process.exit(16);
+    get('run-embed').onclick();
+    setImmediate(() => {
+      const embedSource = sources[sources.length - 1];
+      embedSource.onmessage({ data:'{"type":"embedded","done":1,"total":2}', lastEventId:'1' });
+      if (get('embed-bar').style.width !== '50%') process.exit(17);
+      if (get('embed-progress').getAttribute('aria-valuenow') !== '50') process.exit(18);
+
+      get('run-chunk').disabled = true;
+      get('run-embed').disabled = true;
+      vm.runInContext('beginOperation()', context);
+      if (get('run-chunk').disabled) process.exit(19);
+      if (get('run-embed').disabled) process.exit(20);
+
+      get('embed-bar').style.width = '100%';
+      get('embed-progress').setAttribute('aria-valuenow', '100');
+      get('embed-status').textContent = 'old vectors';
+      get('records').replaceChildren(new Element('old-record'));
+      get('record-count').textContent = '1 record';
+      vm.runInContext(`
+        fetch = async (url) => ({
+          ok:true,
+          json:async () => url.startsWith('/api/status/')
+            ? { status:'done', events:[], cursor:1, session:{unlocked_step:4} }
+            : { job_id:'chunk-job' }
+        });
+        $('run-chunk').onclick();
+      `, context);
+      setImmediate(() => {
+        const chunkSource = sources[sources.length - 1];
+        chunkSource.onmessage({ data:'{"type":"done"}', lastEventId:'1' });
+        setImmediate(() => {
+          if (get('embed-bar').style.width !== '0%') process.exit(21);
+          if (get('embed-progress').getAttribute('aria-valuenow') !== '0') process.exit(22);
+          if (get('embed-status').textContent !== '') process.exit(23);
+          if (get('records').children.length !== 1 || get('records').children[0].textContent !== 'Stored vectors will appear here.') process.exit(24);
+          if (get('record-count').textContent !== '') process.exit(25);
+        });
+      });
+    });
+  });
+});
+"""
+        result = subprocess.run(
+            ["node", "-e", harness, str(script_path)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr or result.stdout
 
 
 class TestUpload:
@@ -274,6 +440,31 @@ class TestChunkAndEmbed:
     def test_status_for_an_unknown_job_is_404(self, client):
         assert client.get("/api/status/nope").status_code == 404
 
+    def test_failed_embed_collection_preflight_leaves_no_running_job(
+        self, client, structured_pdf, monkeypatch
+    ):
+        from app.pipeline.chunkers import Chunk
+
+        self.upload(client, structured_pdf)
+        state = main_module.store.get_or_create(client.cookies["rag_session"])
+        state.chunks = [Chunk(0, "chunk", 0, "recursive")]
+        state.chunking = {"size": 200, "overlap": 20}
+        main_module.store.save(state)
+        monkeypatch.setattr(
+            main_module.vector_store,
+            "get_collection",
+            lambda _client: (_ for _ in ()).throw(RuntimeError("offline")),
+        )
+
+        response = client.post("/api/embed")
+
+        assert response.status_code == 503
+        assert all(
+            job.status != "running"
+            for job in main_module.registry._jobs.values()
+            if job.session_id == state.session_id
+        )
+
 
 class TestCollectionAndReset:
     def test_the_collection_reads_empty(self, client):
@@ -298,6 +489,18 @@ class TestCollectionAndReset:
         response = client.post("/api/reset", json={"drop_collection": True})
         assert response.status_code == 503
         assert "chromadb" in response.json()["detail"].lower()
+
+    def test_collection_read_failure_uses_the_actionable_503_contract(self, client, monkeypatch):
+        monkeypatch.setattr(
+            main_module.vector_store,
+            "read_records",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("read failed")),
+        )
+
+        response = client.get("/api/collection")
+
+        assert response.status_code == 503
+        assert "chromadb is unreachable" in response.json()["detail"].lower()
 
 
 class TestSseFormatting:
@@ -345,7 +548,8 @@ class TestJobRegistry:
         assert asyncio.run(consume()) == [{"id": 1, "type": "chunk", "index": 1}]
 
     def test_late_sse_subscriber_replays_each_event_exactly_once(self, client):
-        job = main_module.registry.create()
+        client.get("/")
+        job = main_module.registry.create(client.cookies["rag_session"])
         main_module.registry.publish(job, {"type": "stage", "message": "already here"})
         main_module.registry.finish(job, "done")
         response = client.get(f"/api/events/{job.job_id}")
@@ -373,7 +577,8 @@ class TestJobRegistry:
         asyncio.run(reconnect())
 
     def test_polling_after_an_sse_cursor_has_no_duplicate_events(self, client):
-        job = main_module.registry.create()
+        client.get("/")
+        job = main_module.registry.create(client.cookies["rag_session"])
         main_module.registry.publish(job, {"type": "stage"})
         main_module.registry.publish(job, {"type": "chunk"})
         main_module.registry.finish(job, "done")
@@ -415,6 +620,194 @@ class TestJobRegistry:
 
 
 class TestJobOwnershipAndAsyncBoundaries:
+    @pytest.mark.parametrize("endpoint", ["status", "events"])
+    def test_job_output_is_hidden_from_another_session(self, client, endpoint):
+        client.get("/")
+        owner_id = client.cookies["rag_session"]
+        job = main_module.registry.create(owner_id)
+        main_module.registry.publish(job, {"type": "chunk", "text": "private text"})
+        main_module.registry.finish(job, "done")
+
+        with TestClient(main_module.app) as stranger:
+            stranger.get("/")
+            response = stranger.get(f"/api/{endpoint}/{job.job_id}")
+
+        assert response.status_code == 404
+        assert "private text" not in response.text
+
+    @pytest.mark.parametrize("endpoint", ["status", "events"])
+    def test_job_reads_rotate_a_malformed_cookie_before_ownership_lookup(
+        self, client, endpoint
+    ):
+        job = main_module.registry.create("somevalidowner")
+        main_module.registry.finish(job, "done")
+        response = client.get(
+            f"/api/{endpoint}/{job.job_id}",
+            cookies={"rag_session": "../../bad"},
+        )
+
+        assert response.status_code == 400
+        assert "rag_session=" in response.headers["set-cookie"]
+
+    def test_delayed_upload_cannot_resurrect_a_reset_session(self, client, monkeypatch):
+        from app.pipeline.loader import LoadResult
+
+        client.get("/")
+        started, release = threading.Event(), threading.Event()
+        result = LoadResult("old", 1, 3, 0, 0, 0, "old-doc", [(0, 1)])
+
+        def delayed_load(_path):
+            started.set()
+            assert release.wait(1)
+            return result
+
+        monkeypatch.setattr(main_module, "load_pdf", delayed_load)
+        response_box = {}
+
+        def upload_old():
+            response_box["response"] = client.post(
+                "/api/upload",
+                files={"file": ("old.pdf", b"%PDF-old", "application/pdf")},
+            )
+
+        thread = threading.Thread(target=upload_old)
+        thread.start()
+        assert started.wait(1)
+        assert client.post("/api/reset", json={}).status_code == 200
+        release.set()
+        thread.join(2)
+
+        assert not thread.is_alive()
+        assert response_box["response"].status_code == 409
+        state = main_module.store.get_or_create(client.cookies["rag_session"])
+        assert state.upload is None
+        assert state.chunking is None
+
+    def test_delayed_upload_cannot_overwrite_a_newer_upload(self, client, monkeypatch):
+        from app.pipeline.loader import LoadResult
+
+        client.get("/")
+        started, release = threading.Event(), threading.Event()
+        call_lock = threading.Lock()
+        calls = 0
+
+        def ordered_load(_path):
+            nonlocal calls
+            with call_lock:
+                calls += 1
+                call_number = calls
+            if call_number == 1:
+                started.set()
+                assert release.wait(1)
+                return LoadResult("old", 1, 3, 0, 0, 0, "old-doc", [(0, 1)])
+            return LoadResult("new", 1, 3, 0, 0, 0, "new-doc", [(0, 1)])
+
+        monkeypatch.setattr(main_module, "load_pdf", ordered_load)
+        response_box = {}
+        old_thread = threading.Thread(
+            target=lambda: response_box.setdefault(
+                "response",
+                client.post(
+                    "/api/upload",
+                    files={"file": ("old.pdf", b"%PDF-old", "application/pdf")},
+                ),
+            ),
+        )
+        old_thread.start()
+        assert started.wait(1)
+        newer = client.post(
+            "/api/upload",
+            files={"file": ("new.pdf", b"%PDF-new", "application/pdf")},
+        )
+        assert newer.status_code == 200
+        release.set()
+        old_thread.join(2)
+
+        assert not old_thread.is_alive()
+        assert response_box["response"].status_code == 409
+        state = main_module.store.get_or_create(client.cookies["rag_session"])
+        assert state.upload["filename"] == "new.pdf"
+        assert state.upload["doc_id"] == "new-doc"
+        assert Path(state.pdf_path).read_bytes() == b"%PDF-new"
+
+    def test_delayed_local_load_cannot_resurrect_a_reset_session(
+        self, client, monkeypatch, tmp_path
+    ):
+        from app.pipeline.loader import LoadResult
+
+        local = tmp_path / "local.pdf"
+        local.write_bytes(b"%PDF-local")
+        monkeypatch.setattr(
+            main_module,
+            "settings",
+            replace(main_module.settings, local_pdf_path=str(local)),
+        )
+        client.get("/")
+        started, release = threading.Event(), threading.Event()
+        monkeypatch.setattr(
+            main_module,
+            "load_pdf",
+            lambda _path: (
+                started.set(),
+                release.wait(1),
+                LoadResult("local", 1, 5, 0, 0, 0, "local-doc", [(0, 1)]),
+            )[-1],
+        )
+        response_box = {}
+        thread = threading.Thread(
+            target=lambda: response_box.setdefault(
+                "response", client.post("/api/use-local")
+            )
+        )
+        thread.start()
+        assert started.wait(1)
+        assert client.post("/api/reset", json={}).status_code == 200
+        release.set()
+        thread.join(2)
+
+        assert not thread.is_alive()
+        assert response_box["response"].status_code == 409
+        assert main_module.store.get_or_create(client.cookies["rag_session"]).upload is None
+
+    def test_embed_claims_ownership_before_delayed_collection_lookup(
+        self, client, monkeypatch
+    ):
+        from app.pipeline.chunkers import Chunk
+
+        client.get("/")
+        state = main_module.store.get_or_create(client.cookies["rag_session"])
+        state.upload = {"filename": "old.pdf", "doc_id": "old-doc"}
+        state.chunks = [Chunk(0, "old chunk", 0, "recursive")]
+        state.chunking = {"size": 200, "overlap": 20}
+        main_module.store.save(state)
+        started, release = threading.Event(), threading.Event()
+        monkeypatch.setattr(
+            main_module.vector_store,
+            "get_collection",
+            lambda _client: (started.set(), release.wait(1), object())[-1],
+        )
+        monkeypatch.setattr(main_module, "build_embeddings", lambda: object())
+        monkeypatch.setattr(main_module, "embed_batched", lambda *_args, **_kwargs: [[1.0]])
+        monkeypatch.setattr(main_module.vector_store, "write_chunks", lambda *_args, **_kwargs: 1)
+        response_box = {}
+
+        def start_embed():
+            response_box["response"] = client.post("/api/embed")
+
+        thread = threading.Thread(target=start_embed)
+        thread.start()
+        assert started.wait(1)
+        assert client.post("/api/reset", json={}).status_code == 200
+        release.set()
+        thread.join(2)
+        time.sleep(0.05)
+
+        assert not thread.is_alive()
+        assert response_box["response"].status_code == 202
+        fresh = main_module.store.get_or_create(client.cookies["rag_session"])
+        assert fresh.upload is None
+        assert fresh.embedding is None
+
     def test_delayed_chunk_cannot_resurrect_a_reset_session(self, client, structured_pdf, monkeypatch):
         from app.pipeline.chunkers import Chunk, ChunkResult
 
@@ -493,3 +886,30 @@ class TestJobOwnershipAndAsyncBoundaries:
             await task
 
         asyncio.run(run())
+
+    def test_session_persistence_does_not_block_the_event_loop(self, monkeypatch, tmp_path):
+        from app.pipeline.loader import LoadResult
+
+        started, release = threading.Event(), threading.Event()
+        result = LoadResult("text", 1, 4, 0, 0, 0, "doc", [(0, 1)])
+        monkeypatch.setattr(main_module, "load_pdf", lambda _path: result)
+        monkeypatch.setattr(
+            main_module.store,
+            "save",
+            lambda _state: (started.set(), release.wait(0.5)),
+        )
+        state = main_module.store.get_or_create(None)
+
+        async def run() -> None:
+            task = asyncio.create_task(
+                main_module._ingest_path(state, tmp_path / "source.pdf", "x.pdf")
+            )
+            assert await asyncio.to_thread(started.wait, 0.2)
+            await asyncio.sleep(0.01)
+            assert not task.done()
+            release.set()
+            await task
+
+        started_at = time.monotonic()
+        asyncio.run(run())
+        assert time.monotonic() - started_at < 0.3
