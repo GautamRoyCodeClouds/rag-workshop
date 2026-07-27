@@ -121,8 +121,8 @@ def page_for_offset(page_offsets: list[tuple[int, int]], offset: int) -> int:
 
     Module-level, not just a LoadResult method: SessionState (app/session.py)
     needs the identical lookup after a JSON round-trip, once the LoadResult
-    object itself no longer exists. This exact function has already been the
-    source of three separate bugs in this project, so it gets one home rather
+    object itself no longer exists. Character-offset attribution has
+    repeatedly produced bugs in this codebase, so this gets one home rather
     than two copies free to drift apart.
     """
     if not page_offsets:

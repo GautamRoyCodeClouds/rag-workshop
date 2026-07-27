@@ -60,10 +60,10 @@ class SessionState:
         """Page number for a character offset.
 
         Delegates to app.pipeline.loader.page_for_offset -- the same bisect
-        lookup LoadResult uses -- instead of keeping a second copy here. That
-        exact piece of logic has already caused three separate bugs in this
-        project; one shared implementation is the fix, not a careful second
-        copy.
+        lookup LoadResult uses -- instead of keeping a second copy here.
+        Character-offset attribution has repeatedly produced bugs in this
+        codebase; one shared implementation is what keeps this side and the
+        loader's from drifting apart, not a careful second copy.
         """
         return _page_for_offset(self.page_offsets, offset)
 
@@ -125,8 +125,19 @@ class SessionStore:
         self._live: dict[str, SessionState] = {}
 
     def _path(self, session_id: str) -> Path:
-        # Session ids are generated uuid4 hex strings, never user input, so they
-        # are safe as filenames. Validated anyway rather than trusted.
+        # Session ids arrive from a client-supplied cookie or header (Task 7
+        # wires that up), not just the uuid4 hex this module mints -- so they
+        # are validated, not trusted, before use as a filename.
+        #
+        # Policy: a malformed id (fails .isalnum(), which also rules out
+        # "..", "/", "\0", etc.) is rejected by *raising* here, and every
+        # caller -- get_or_create, save, reset -- lets that ValueError
+        # propagate rather than catching it. The alternative (silently
+        # substituting a fresh id) was tried and rejected: it turns a client
+        # stuck sending a bad cookie into a session that resets on every
+        # single request, with nothing in the response to say why. Task 7 is
+        # expected to catch this ValueError at the API boundary and turn it
+        # into a clean 400 plus a newly issued session -- not swallow it here.
         if not session_id.isalnum():
             raise ValueError(f"Malformed session id: {session_id!r}")
         return self.data_dir / f"{session_id}.json"
@@ -136,14 +147,25 @@ class SessionStore:
         if session_id:
             if session_id in self._live:
                 return self._live[session_id]
-            try:
-                path = self._path(session_id)
-            except ValueError:
-                path = None
-            if path is not None and path.is_file():
-                state = SessionState.from_json(json.loads(path.read_text()))
-                self._live[state.session_id] = state
-                return state
+            # No try/except around _path: a malformed id must raise here (see
+            # _path's comment for the policy), not be treated as "no session
+            # on disk" and quietly handed a brand-new id.
+            path = self._path(session_id)
+            if path.is_file():
+                try:
+                    state = SessionState.from_json(json.loads(path.read_text()))
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    # app-data is a named volume that survives image rebuilds,
+                    # so a session file written under an older schema (a
+                    # renamed field, Chunk gaining/losing one) can still be on
+                    # disk after a later deploy changes the shape. Falling
+                    # back to a fresh session turns that into "presenter
+                    # starts over", not a 500 on every request until someone
+                    # manually clears the volume mid-workshop.
+                    pass
+                else:
+                    self._live[state.session_id] = state
+                    return state
 
         state = SessionState(session_id=uuid.uuid4().hex, created_at=_now_iso())
         self._live[state.session_id] = state
@@ -152,17 +174,29 @@ class SessionStore:
     def save(self, state: SessionState) -> None:
         """Mirror a session to disk atomically.
 
-        Written to a temporary file and moved into place, so a crash mid-write
-        cannot leave a half-written session that fails to parse on reload.
+        Written to a temp file and moved into place with `replace`, so a
+        crash mid-write cannot leave a half-written session that fails to
+        parse on reload. The temp name includes a fresh uuid, not just the
+        session id: FastAPI runs sync endpoints in a threadpool, so an
+        SSE-driven save and a status-poll save of the *same* session can race,
+        and two saves sharing one `<sid>.json.tmp` path could `replace` torn
+        content into place. This guards against a crash, not a power loss --
+        there is no fsync before `replace`.
         """
-        self._live[state.session_id] = state
         target = self._path(state.session_id)
-        temp = target.with_suffix(".json.tmp")
+        self._live[state.session_id] = state
+        temp = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
         temp.write_text(json.dumps(state.to_disk(), indent=2))
         temp.replace(target)
 
     def reset(self, session_id: str) -> SessionState:
-        """Discard a session's progress, keeping the same id."""
+        """Discard a session's progress, keeping the same id.
+
+        Goes through save(), so the cleared state is persisted, not just
+        reassigned in `self._live` -- a second worker or a reloaded process
+        must see the reset too, or it silently rehydrates the pre-reset file
+        from the app-data volume on the next request.
+        """
         fresh = SessionState(session_id=session_id, created_at=_now_iso())
         self.save(fresh)
         return fresh
