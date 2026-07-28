@@ -6,6 +6,7 @@ import asyncio
 import json
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from pathlib import Path
 
 import chromadb
@@ -20,7 +21,9 @@ from app.jobs import registry, sse_format
 from app.pipeline import store as vector_store
 from app.pipeline.chunkers import STRATEGIES, UnknownStrategyError, chunk
 from app.pipeline.embedder import build_embeddings, embed_batched
+from app.pipeline.generator import build_prompt, probe, stream_answer
 from app.pipeline.loader import EmptyDocumentError, load_pdf
+from app.pipeline.retriever import Candidate, retrieve
 from app.pipeline.store import get_client
 from app.session import store
 
@@ -142,6 +145,29 @@ def index(request: Request):
             "settings": settings,
             "state": state.to_json(),
             "has_local_pdf": settings.local_pdf is not None,
+        },
+    )
+    _with_session_cookie(response, state.session_id)
+    return response
+
+
+@app.get("/chat", response_class=HTMLResponse)
+def chat_page(request: Request):
+    """The retrieval-chat page.
+
+    Deliberately does not gate on unlocked_step(): chat depends only on
+    whatever is already in ChromaDB, not on this browser's session having run
+    the ingestion pipeline. A second machine, or the same one after "Reset
+    everything", must still be able to open /chat and query whatever a prior
+    session already embedded.
+    """
+    state = _session(request)
+    response = templates.TemplateResponse(
+        request=request,
+        name="chat.html",
+        context={
+            "settings": settings,
+            "state": state.to_json(),
         },
     )
     _with_session_cookie(response, state.session_id)
@@ -558,4 +584,210 @@ async def reset(request: Request) -> Response:
         fresh = await asyncio.to_thread(store.reset, state.session_id)
     response = _json_response(fresh.to_json())
     _with_session_cookie(response, fresh.session_id)
+    return response
+
+
+# --- Retrieval chat -----------------------------------------------------
+
+def _trace_to_json(trace) -> dict:
+    """RetrievalTrace (and its nested Candidate/Stage dataclasses) as plain
+    JSON-safe data. dataclasses.asdict recurses through both nested types,
+    so this stays correct if either dataclass gains a field.
+    """
+    return asdict(trace)
+
+
+def _citation(candidate: Candidate) -> dict:
+    # "" is Chroma's None-sentinel (see store.py); page/chunk_index/source
+    # should always be present on anything write_chunks wrote, but a record
+    # written by an older schema (app-data survives rebuilds) might not have
+    # every key, so .get() with the same honest fallbacks store.py uses.
+    return {
+        "page": candidate.metadata.get("page", ""),
+        "source": candidate.metadata.get("source", ""),
+        "chunk_index": candidate.metadata.get("chunk_index", -1),
+    }
+
+
+def _extractive_answer(selected: list[Candidate]) -> str:
+    """Assemble an answer straight from the selected chunks, no LLM involved.
+
+    This is what the room sees whenever Ollama is not configured or not
+    reachable -- the common case, since the app is offline by default. It is
+    deliberately just the chunks themselves with their citations, not a
+    summary: manufacturing prose here would blur the line this whole feature
+    exists to show, between "the retriever found this text" and "a model
+    said this".
+    """
+    blocks = []
+    for i, candidate in enumerate(selected, start=1):
+        metadata = candidate.metadata
+        source = metadata.get("source") or "unknown source"
+        page = metadata.get("page", "")
+        label = f"[{i}] {source}, page {page}" if page != "" else f"[{i}] {source}"
+        blocks.append(f"{label}\n{candidate.text}")
+    return "\n\n".join(blocks)
+
+
+@app.post("/api/chat/reset")
+async def chat_reset(request: Request) -> Response:
+    """Clear chat history only.
+
+    Deliberately does not touch state.upload/chunking/embedding, does not
+    call registry.claim_session (that would cancel any running chunk/embed
+    job for no reason), and never drops the Chroma collection -- chat is a
+    read-only consumer of whatever is already indexed, so "start the chat
+    over" and "start the pipeline over" must stay two different buttons.
+    """
+    state = _session(request)
+    state.chat = []
+    await asyncio.to_thread(store.save, state)
+    response = _json_response({**state.to_json(), "history_length": 0})
+    _with_session_cookie(response, state.session_id)
+    return response
+
+
+@app.post("/api/chat")
+async def chat(request: Request) -> Response:
+    """Answer one question against whatever is already in ChromaDB.
+
+    Retrieval runs synchronously -- the transparency panel must be fully
+    populated before any answer appears, in either the "I don't know" or the
+    extractive/generated case, and that ordering is the actual point being
+    taught here, not an implementation detail. Only the optional generated
+    answer streams, over the same job registry the ingestion pipeline uses.
+    """
+    state = _session(request)
+    body = await _request_body(request)
+
+    message = body.get("message", "")
+    if not isinstance(message, str) or not message.strip():
+        raise HTTPException(status_code=400, detail="Message must not be blank.")
+
+    try:
+        top_k = int(body.get("top_k", settings.retrieval_top_k))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="top_k must be an integer.") from exc
+    if top_k <= 0:
+        raise HTTPException(status_code=400, detail="top_k must be a positive integer (> 0).")
+
+    try:
+        min_score = float(body.get("min_score", settings.retrieval_min_score))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="min_score must be a number.") from exc
+    if not (-1.0 <= min_score <= 1.0):
+        raise HTTPException(status_code=400, detail="min_score must be between -1 and 1.")
+
+    algorithm = body.get("algorithm", "similarity")
+    if algorithm not in ("similarity", "mmr"):
+        raise HTTPException(status_code=400, detail="algorithm must be 'similarity' or 'mmr'.")
+
+    try:
+        mmr_lambda = float(body.get("mmr_lambda", settings.retrieval_mmr_lambda))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="mmr_lambda must be a number.") from exc
+
+    # _collection() raises a 503 HTTPException on its own -- validation above
+    # must run before this, so a bad request body is a 400 even when Chroma
+    # also happens to be down, not the other way around.
+    collection = await _collection()
+    embeddings = await asyncio.to_thread(build_embeddings)
+    trace = await asyncio.to_thread(
+        retrieve,
+        collection,
+        query=message,
+        embeddings=embeddings,
+        top_k=top_k,
+        min_score=min_score,
+        algorithm=algorithm,
+        mmr_lambda=mmr_lambda,
+        pool_multiplier=settings.retrieval_pool_multiplier,
+    )
+
+    message_id = uuid.uuid4().hex
+
+    if not trace.answerable:
+        # The most important state this endpoint can return: an honest "I
+        # don't know" that names *why*, not a 500 and not a guess. The two
+        # reasons are genuinely different problems for the room -- "index
+        # something first" versus "loosen the threshold or rephrase" -- so
+        # they get different text, not one generic message.
+        reason = (
+            "no documents are indexed yet"
+            if trace.pool_size == 0
+            else "nothing retrieved scored above the similarity threshold"
+        )
+        answer = {"kind": "unknown", "text": f"I don't know -- {reason}.", "citations": []}
+        generation = {"available": False, "model": settings.ollama_model, "detail": "", "job_id": None}
+    else:
+        citations = [_citation(c) for c in trace.selected]
+        status = None
+        if settings.ollama_base_url:
+            status = await asyncio.to_thread(probe, settings.ollama_base_url, settings.ollama_model)
+
+        if status is not None and status.available:
+            job = registry.create(state.session_id)
+            prompt = build_prompt(
+                message,
+                [{"text": c.text, "metadata": c.metadata} for c in trace.selected],
+            )
+            base_url, model = settings.ollama_base_url, settings.ollama_model
+
+            def run_generation() -> None:
+                try:
+                    for delta in stream_answer(base_url, model, prompt):
+                        registry.publish(job, {"type": "token", "text": delta})
+                    registry.finish(job, "done")
+                except Exception as exc:  # noqa: BLE001 - delivered to the job UI
+                    registry.finish(job, "error", f"{type(exc).__name__}: {exc}")
+
+            # stream_answer is a blocking (urllib-based) generator, same as
+            # every other transport call in this file -- to_thread keeps the
+            # event loop free, same reasoning as _document_text/build_embeddings
+            # above.
+            registry.register_task(job, asyncio.create_task(asyncio.to_thread(run_generation)))
+            answer = {"kind": "generated", "text": "", "citations": citations}
+            generation = {
+                "available": True,
+                "model": settings.ollama_model,
+                "detail": "",
+                "job_id": job.job_id,
+            }
+        else:
+            detail = (
+                status.detail
+                if status is not None
+                else "OLLAMA_BASE_URL is not set -- generation is disabled by default, offline-first."
+            )
+            answer = {
+                "kind": "extractive",
+                "text": _extractive_answer(trace.selected),
+                "citations": citations,
+            }
+            generation = {
+                "available": False,
+                "model": settings.ollama_model,
+                "detail": detail,
+                "job_id": None,
+            }
+
+    trace_json = _trace_to_json(trace)
+    state.chat.append({
+        "message_id": message_id,
+        "question": message,
+        "answer": answer,
+        "generation": generation,
+        "trace": trace_json,
+    })
+    await asyncio.to_thread(store.save, state)
+
+    response = _json_response({
+        "message_id": message_id,
+        "question": message,
+        "answer": answer,
+        "generation": generation,
+        "trace": trace_json,
+        "history_length": len(state.chat),
+    })
+    _with_session_cookie(response, state.session_id)
     return response

@@ -16,8 +16,13 @@ It is a *teaching instrument*, not a product. That distinction drives most of
 the rules below: the code is projected on a screen and read by attendees, so
 clarity and honesty about what is really happening outrank cleverness.
 
-There is no retrieval, no query, and no LLM anywhere in this scope. Steps 1–5
-stop at "the vectors are in the database, here they are."
+Steps 1–5 (the ingestion wizard at `/`) stop at "the vectors are in the
+database, here they are" — no retrieval, query, or LLM call happens there. A
+separate, always-reachable `/chat` page runs the query half: `POST /api/chat`
+retrieves against whatever is already in ChromaDB and optionally generates an
+answer over Ollama. It does not depend on this browser's session having run
+the ingestion pipeline at all — only on what some session, at some point, has
+already embedded.
 
 ## Commands
 
@@ -52,15 +57,27 @@ which the Python image does not have).
 | `app/pipeline/chunkers.py` | The five strategies, the `STRATEGIES` registry, and offset location |
 | `app/pipeline/embedder.py` | Cached model load, `embed_batched` with genuine per-batch progress |
 | `app/pipeline/store.py` | ChromaDB writes with delete-before-write, plus the record browser read |
+| `app/pipeline/retriever.py` | Query-time retrieval: similarity/MMR ranking, the full `RetrievalTrace` |
+| `app/pipeline/generator.py` | Optional Ollama generation: `probe`, prompt assembly, reasoning-stripped streaming |
 | `app/session.py` | Per-session state, the server-side unlock rule, JSON mirror to disk |
 | `app/jobs.py` | Job registry: generation-based invalidation, cursor-resumable SSE |
 | `app/main.py` | FastAPI routes |
-| `app/templates/`, `app/static/` | The progressive-unlock page |
+| `app/templates/`, `app/static/` | The progressive-unlock page and the chat page |
 
 Data flow: `POST /api/upload` parses and persists → `POST /api/chunk` and
 `POST /api/embed` return `202 {job_id}` and run as asyncio tasks → the client
 follows `GET /api/events/{job_id}` (SSE) with `GET /api/status/{job_id}` as a
 polling fallback → `GET /api/collection` paginates stored records.
+
+Chat is a separate flow, not a sixth pipeline step: `POST /api/chat` runs
+retrieval synchronously (the transparency panel must be populated before any
+answer appears) and returns the full trace plus an answer in the same
+response. When Ollama is configured and reachable that answer is `"kind":
+"generated"` with a `job_id`, and the tokens stream over the same
+`/api/events/{job_id}` machinery the ingestion pipeline uses; otherwise it is
+`"extractive"` (assembled straight from the retrieved chunks) or `"unknown"`
+(an honest "I don't know" — empty collection or nothing cleared the
+threshold, never an error).
 
 ## Hard rules
 
@@ -148,9 +165,14 @@ verbally. Do not edit the deck to match the app.
 return of `2` already means both are reachable. This is deliberate and is
 documented at the function.
 
-**`ollama_base_url` is read by nothing.** It is a reserved seam for a future
-query build (deck Levels 5–6), where `deepseek-r1:1.5b` is the intended
-generation model. Semantic chunking uses an *embeddings* model, not an LLM.
+**`ollama_base_url` backs `POST /api/chat`'s optional generation step.** When
+set, and `probe()` reports the configured `ollama_model`
+(`deepseek-r1:1.5b` by default) available, the chat streams a real generated
+answer through the job registry. Left unset (the default) the chat still
+works, falling back to an extractive answer assembled from the retrieved
+chunks — the app stays offline-first with no network and no Ollama at all.
+Semantic *chunking* is unrelated and still uses an *embeddings* model, not an
+LLM.
 
 ## Testing standard
 

@@ -39,8 +39,53 @@ class TestUnlocking:
         state.embedding = {"vectors_written": 12}
         assert state.unlocked_step() == 5
 
+    def test_chat_history_never_unlocks_a_pipeline_step(self, tmp_path):
+        """/chat is reachable with no upload at all -- it depends only on
+        what is already in ChromaDB, never on this session's own pipeline
+        progress. If appending chat messages ever changed unlocked_step(),
+        the ingestion wizard would start mid-unlocked for a presenter who
+        only ever used the chat page, which is exactly backwards.
+        """
+        state = make_store(tmp_path).get_or_create(None)
+        state.chat = [
+            {
+                "message_id": "abc123",
+                "question": "What is the leave policy?",
+                "answer": {"kind": "unknown", "text": "I don't know -- no documents are indexed yet.", "citations": []},
+                "generation": {"available": False, "model": "deepseek-r1:1.5b", "detail": "", "job_id": None},
+                "trace": {"answerable": False},
+            }
+        ]
+        assert state.unlocked_step() == 1
+
 
 class TestPersistence:
+    def test_chat_history_survives_a_store_round_trip(self, tmp_path):
+        """A refresh mid-demo must not drop the conversation, matching the
+        module's headline requirement for pipeline state. The full entry --
+        including its trace -- comes back, since to_disk keeps what to_json
+        trims (see TestClientView).
+        """
+        first = make_store(tmp_path)
+        state = first.get_or_create(None)
+        state.chat = [{
+            "message_id": "abc123",
+            "question": "What is the leave policy?",
+            "answer": {"kind": "extractive", "text": "20 days per year.", "citations": [{"page": 4, "source": "handbook.pdf", "chunk_index": 12}]},
+            "generation": {"available": False, "model": "deepseek-r1:1.5b", "detail": "", "job_id": None},
+            "trace": {"query": "What is the leave policy?", "answerable": True},
+        }]
+        first.save(state)
+
+        rehydrated = make_store(tmp_path).get_or_create(state.session_id)
+        assert len(rehydrated.chat) == 1
+        assert rehydrated.chat[0]["message_id"] == "abc123"
+        assert rehydrated.chat[0]["answer"]["text"] == "20 days per year."
+        assert rehydrated.chat[0]["answer"]["citations"] == [{"page": 4, "source": "handbook.pdf", "chunk_index": 12}]
+        assert rehydrated.chat[0]["trace"]["answerable"] is True
+        # unlocked_step() must not have been affected by any of the above.
+        assert rehydrated.unlocked_step() == 1
+
     def test_save_and_reload_restores_chunks_and_upload(self, tmp_path):
         first = make_store(tmp_path)
         state = first.get_or_create(None)
@@ -337,3 +382,27 @@ class TestClientView:
         # DOES carry the body, proving to_json is a genuinely smaller view of
         # the same state rather than a view that merely never mentions chunks.
         assert "x" * 700 in str(state.to_disk())
+
+    def test_to_json_includes_chat_but_strips_each_entry_trace(self, tmp_path):
+        """Chat messages themselves ARE in the client view (so /chat can
+        re-render history after a refresh) but each entry's retrieval trace
+        is stripped -- the client already received that in the POST response
+        that created the entry, and a trace carries every pool candidate, not
+        just the winners.
+        """
+        state = make_store(tmp_path).get_or_create(None)
+        state.chat = [{
+            "message_id": "abc123",
+            "question": "What is the leave policy?",
+            "answer": {"kind": "extractive", "text": "some answer", "citations": []},
+            "generation": {"available": False, "model": "m", "detail": "", "job_id": None},
+            "trace": {"query": "What is the leave policy?", "pool_size": "MARKER_LARGE_TRACE_PAYLOAD"},
+        }]
+        as_json = state.to_json()
+        assert as_json["chat"][0]["message_id"] == "abc123"
+        assert as_json["chat"][0]["question"] == "What is the leave policy?"
+        assert "trace" not in as_json["chat"][0]
+        assert "MARKER_LARGE_TRACE_PAYLOAD" not in str(as_json)
+        # The full-fidelity disk view keeps the trace -- to_json trimming it
+        # is a bandwidth decision for repeated client reads, not data loss.
+        assert state.to_disk()["chat"][0]["trace"]["pool_size"] == "MARKER_LARGE_TRACE_PAYLOAD"

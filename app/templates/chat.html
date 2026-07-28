@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RAG Retrieval Chat</title>
+  <link rel="icon" href="data:,">
+</head>
+<body>
+  <!--
+    Placeholder only. This page is wired up by app/main.py's GET /chat route
+    so tests can exercise the route and the API it talks to
+    (POST /api/chat, POST /api/chat/reset); a separate pass builds the real
+    template, CSS and JS. window.__STATE__ carries the same session view
+    index.html uses, chat entries included (each entry's full retrieval
+    trace is stripped -- see SessionState.to_json's docstring).
+  -->
+  <p>Retrieval chat placeholder.</p>
+  <script>window.__STATE__ = {{ state | tojson }};</script>
+</body>
+</html>

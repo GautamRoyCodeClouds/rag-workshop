@@ -46,10 +46,25 @@ class Settings:
     # file picker mid-talk. Unset for everyone else, and the button vanishes.
     local_pdf_path: str = ""
 
-    # Reserved seam for the future query build (deck Levels 5-6). Read by
-    # nothing in this scope -- see CLAUDE.md. deepseek-r1:1.5b is the intended
-    # generation model.
+    # --- Retrieval (deck Levels 5-6: the query-time half of RAG) -----------
+    # top_k / min_score are the two knobs the chat panel exposes live; 5 and
+    # 0.25 are the deck's own worked example.
+    retrieval_top_k: int = 5
+    retrieval_min_score: float = 0.25
+    # Restated from retrieve()'s own default in retriever.py, not just left
+    # implicit, so an env override changes both call sites consistently
+    # rather than only the one that happens to pass it explicitly.
+    retrieval_mmr_lambda: float = 0.5
+    retrieval_pool_multiplier: int = 4
+
+    # Backs POST /api/chat's optional generation step: when ollama_base_url is
+    # set and `probe()` reports this model available, the chat streams a real
+    # generated answer through the job registry; otherwise it falls back to an
+    # extractive answer assembled from the retrieved chunks. Unset by default
+    # so the demo works with no network and no Ollama at all. deepseek-r1:1.5b
+    # is the model this repo's tests and CLAUDE.md are written against.
     ollama_base_url: str = ""
+    ollama_model: str = "deepseek-r1:1.5b"
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
@@ -63,6 +78,14 @@ class Settings:
         def number(key: str, default: int) -> int:
             value = e.get(key)
             return default if value is None or value == "" else int(value)
+
+        def decimal(key: str, default: float) -> float:
+            # Same contract as number(): empty/unset falls back to the
+            # default, anything else is parsed strictly -- a malformed value
+            # (e.g. "abc") raises via float() rather than silently becoming
+            # 0.0, which would make min_score's threshold pass everything.
+            value = e.get(key)
+            return default if value is None or value == "" else float(value)
 
         return cls(
             chroma_host=text("CHROMA_HOST", cls.chroma_host),
@@ -80,7 +103,14 @@ class Settings:
             max_upload_mb=number("MAX_UPLOAD_MB", cls.max_upload_mb),
             data_dir=Path(text("DATA_DIR", str(cls.data_dir))),
             local_pdf_path=text("LOCAL_PDF_PATH", cls.local_pdf_path),
+            retrieval_top_k=number("RETRIEVAL_TOP_K", cls.retrieval_top_k),
+            retrieval_min_score=decimal("RETRIEVAL_MIN_SCORE", cls.retrieval_min_score),
+            retrieval_mmr_lambda=decimal("RETRIEVAL_MMR_LAMBDA", cls.retrieval_mmr_lambda),
+            retrieval_pool_multiplier=number(
+                "RETRIEVAL_POOL_MULTIPLIER", cls.retrieval_pool_multiplier
+            ),
             ollama_base_url=text("OLLAMA_BASE_URL", cls.ollama_base_url),
+            ollama_model=text("OLLAMA_MODEL", cls.ollama_model),
         )
 
     @property

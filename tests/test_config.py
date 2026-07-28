@@ -4,6 +4,7 @@ deck changed or someone drifted from it -- check the slide first.
 from pathlib import Path
 
 import chromadb
+import pytest
 import yaml
 
 from app.config import Settings
@@ -25,6 +26,55 @@ def test_env_overrides_are_typed():
     assert s.default_chunk_size == 1500
     assert s.chroma_port == 9000
     assert isinstance(s.chroma_port, int)
+
+
+def test_retrieval_defaults():
+    s = Settings.from_env({})
+    assert s.retrieval_top_k == 5
+    assert s.retrieval_min_score == 0.25
+    assert s.retrieval_mmr_lambda == 0.5
+    assert s.retrieval_pool_multiplier == 4
+    assert s.ollama_model == "deepseek-r1:1.5b"
+    assert s.ollama_base_url == ""
+
+
+def test_retrieval_env_overrides_are_typed():
+    s = Settings.from_env({
+        "RETRIEVAL_TOP_K": "8",
+        "RETRIEVAL_MIN_SCORE": "0.4",
+        "RETRIEVAL_MMR_LAMBDA": "0.7",
+        "RETRIEVAL_POOL_MULTIPLIER": "6",
+        "OLLAMA_MODEL": "llama3.2:1b",
+        "OLLAMA_BASE_URL": "http://host.docker.internal:11434",
+    })
+    assert s.retrieval_top_k == 8
+    assert isinstance(s.retrieval_top_k, int)
+    assert s.retrieval_min_score == pytest.approx(0.4)
+    assert isinstance(s.retrieval_min_score, float)
+    assert s.retrieval_mmr_lambda == pytest.approx(0.7)
+    assert s.retrieval_pool_multiplier == 6
+    assert s.ollama_model == "llama3.2:1b"
+    assert s.ollama_base_url == "http://host.docker.internal:11434"
+
+
+def test_decimal_empty_string_falls_back_to_default():
+    # Same contract as number()'s empty-string handling, checked for the new
+    # float helper specifically -- an empty env var must not become 0.0,
+    # which would make min_score's threshold accept everything.
+    s = Settings.from_env({"RETRIEVAL_MIN_SCORE": ""})
+    assert s.retrieval_min_score == 0.25
+
+
+def test_decimal_malformed_value_raises():
+    # Mirrors number()'s int(value) behaviour: a genuinely bad value must
+    # raise, not silently coerce to 0.0 or the default.
+    with pytest.raises(ValueError):
+        Settings.from_env({"RETRIEVAL_MIN_SCORE": "not-a-number"})
+
+
+def test_decimal_malformed_mmr_lambda_raises():
+    with pytest.raises(ValueError):
+        Settings.from_env({"RETRIEVAL_MMR_LAMBDA": "abc"})
 
 
 def test_empty_env_value_falls_back_to_default():

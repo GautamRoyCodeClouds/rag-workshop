@@ -39,6 +39,13 @@ class SessionState:
     pdf_path: str = ""
     page_offsets: list[tuple[int, int]] = field(default_factory=list)
 
+    # Chat is a separate, always-reachable feature (see app/main.py's /chat
+    # route) that never touches the ingestion pipeline's own state. Each
+    # entry is a plain dict -- message_id, question, answer, generation, and
+    # the full RetrievalTrace as JSON -- not a dataclass, since it is never
+    # read back into typed objects, only replayed to the client as-is.
+    chat: list[dict] = field(default_factory=list)
+
     def unlocked_step(self) -> int:
         """The highest step the user may interact with.
 
@@ -73,6 +80,15 @@ class SessionState:
 
         Chunk bodies are excluded: they stream over SSE during step 3, and
         shipping hundreds of them again in a status payload would be waste.
+
+        Chat entries are included so /chat can re-render past messages after a
+        refresh, but each entry's "trace" key is stripped first: the client
+        already received that full RetrievalTrace in the POST /api/chat
+        response body that created the entry, so repeating it in every later
+        page load / status response (this method is called from several
+        routes, not just /chat) would be the same kind of waste chunk bodies
+        already avoid -- a trace carries every pool candidate, which can be
+        many times bigger than the message it belongs to.
         """
         return {
             "session_id": self.session_id,
@@ -81,10 +97,14 @@ class SessionState:
             "chunking": self.chunking,
             "embedding": self.embedding,
             "unlocked_step": self.unlocked_step(),
+            "chat": [
+                {k: v for k, v in entry.items() if k != "trace"}
+                for entry in self.chat
+            ],
         }
 
     def to_disk(self) -> dict:
-        """The full persisted view, chunk bodies included."""
+        """The full persisted view, chunk bodies and chat traces included."""
         return {
             **self.to_json(),
             "pdf_path": self.pdf_path,
@@ -100,6 +120,11 @@ class SessionState:
                 }
                 for c in self.chunks
             ],
+            # Overrides the trimmed "chat" from to_json() above: the on-disk
+            # copy keeps each entry's trace so a restarted process (or a
+            # future re-hydration route) has it, even though today's /chat
+            # route never reads it back out.
+            "chat": self.chat,
         }
 
     @classmethod
@@ -114,6 +139,9 @@ class SessionState:
             # JSON has no tuples; restore them so bisect comparisons behave.
             page_offsets=[tuple(pair) for pair in data.get("page_offsets", [])],
             chunks=[Chunk(**item) for item in data.get("chunks", [])],
+            # Plain dicts, no reconstruction needed -- unlike Chunk above,
+            # nothing here is ever read back into a dataclass.
+            chat=list(data.get("chat", [])),
         )
 
 
