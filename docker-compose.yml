@@ -35,6 +35,21 @@ services:
       CHROMA_HOST: chromadb
       CHROMA_PORT: "8000"
       DATA_DIR: /data
+      # Answer generation is opt-in and off by default, the same way the local
+      # document shortcut is. Empty means the chat page answers extractively
+      # from the retrieved chunks, which needs no setup and is what an attendee
+      # cloning this repo gets. Set these in .env to enable generation.
+      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-}"
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-deepseek-r1:1.5b}"
+    # Ollama runs on the host, not in this network. host-gateway resolves to the
+    # host from inside the container, which is the only way to reach it -- and it
+    # is harmless when OLLAMA_BASE_URL is unset.
+    #
+    # The host side needs work too: Ollama binds to 127.0.0.1 by default, so it
+    # refuses container traffic until you start it with OLLAMA_HOST=0.0.0.0.
+    # Without that, this mapping resolves but the connection is refused.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       chromadb:
         condition: service_healthy
