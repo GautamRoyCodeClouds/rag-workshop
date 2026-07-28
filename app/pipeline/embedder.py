@@ -38,7 +38,20 @@ def _build_embeddings_cached(model_name: str) -> HuggingFaceEmbeddings:
     return HuggingFaceEmbeddings(
         model_name=model_name,
         model_kwargs={"device": "cpu"},
-        # normalize_embeddings is the deck's "normalise once at write time".
+        # The deck's "normalise once at write time" -- but be precise about what
+        # this flag does, because it is easy to over-claim in front of a room.
+        # all-MiniLM-L6-v2's own pipeline ends in a Normalize module, so its
+        # output is already unit length and this flag changes nothing:
+        # encode(normalize_embeddings=False) returns vectors of norm 1.0 too.
+        #
+        # It is kept as insurance against a model swap. Point EMBED_MODEL at a
+        # model without that module and this flag becomes the only thing
+        # preserving the unit-norm invariant that "hnsw:space: cosine" and the
+        # norm-1.0 column in the collection browser both depend on.
+        #
+        # test_normalisation_is_a_real_transformation_not_a_no_op pins the
+        # actual claim, by reaching the pooled vector *before* normalisation
+        # (norm ~5.7) -- no assertion on this pipeline's output can fail.
         encode_kwargs={"normalize_embeddings": True},
     )
 
@@ -101,5 +114,9 @@ def vector_norm(vector: list[float]) -> float:
 
     Shown in the collection preview: seeing 1.000 next to every record is how
     the room confirms normalisation happened rather than taking it on trust.
+
+    Worth knowing before saying that out loud, though: with all-MiniLM-L6-v2
+    the 1.000 is guaranteed by the model's own Normalize module, not by
+    anything this codebase does. See the comment in _build_embeddings_cached.
     """
     return math.sqrt(sum(component * component for component in vector))

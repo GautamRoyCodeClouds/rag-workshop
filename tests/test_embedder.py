@@ -69,12 +69,75 @@ def test_vector_norm_of_a_zero_vector_is_zero():
 
 @pytest.mark.slow
 def test_real_model_produces_l2_normalised_vectors():
-    """The deck says normalise once at write time so cosine becomes a dot
-    product. This is the test that proves we actually did."""
+    """Stored vectors are 384-dimensional and unit length.
+
+    Note what this does NOT show. It cannot fail: all-MiniLM-L6-v2 ends its own
+    pipeline with a Normalize module, so its output is unit length whatever this
+    codebase does -- deleting encode_kwargs entirely leaves this green. It pins
+    the shape of what we store, and nothing about normalisation being ours. The
+    test below is the one that proves normalisation is real.
+    """
     embeddings = build_embeddings()
     vectors = embed_batched(embeddings, ["annual leave policy"], batch_size=8)
     assert len(vectors[0]) == 384
     assert vector_norm(vectors[0]) == pytest.approx(1.0, abs=1e-3)
+
+
+@pytest.mark.slow
+def test_normalisation_is_a_real_transformation_not_a_no_op():
+    """Prove the deck's claim instead of restating it.
+
+    "Normalise so cosine becomes a dot product" is a claim about a
+    transformation having an effect. No assertion on the pipeline's *output*
+    can demonstrate that, because the output is unit length either way -- even
+    encode(normalize_embeddings=False) returns norm 1.0, since the flag does not
+    disable the model's own Normalize module.
+
+    The only way to see the effect is to reach the vector before it: run the
+    Transformer and Pooling stages and stop short of Normalize. That pooled
+    vector is emphatically not unit length (~5.7 for this sentence), and
+    dividing it by its own length reproduces the full pipeline exactly -- which
+    is what "normalisation" means, made observable.
+    """
+    import torch
+    from sentence_transformers import SentenceTransformer
+
+    from app.config import settings
+
+    sentence = "Vector databases store embeddings, not text."
+    model = SentenceTransformer(settings.embed_model)
+
+    # The guard that makes the flag's redundancy a fact rather than a belief.
+    # If a future EMBED_MODEL lacks this stage, encode_kwargs stops being
+    # belt-and-braces and becomes load-bearing -- and this fails to say so.
+    stages = [type(stage).__name__ for stage in model]
+    assert stages[-1] == "Normalize", (
+        f"model pipeline ends in {stages[-1]!r}, not Normalize -- "
+        "normalize_embeddings=True is now the only thing keeping vectors "
+        "unit-length, and the rest of this test no longer holds"
+    )
+
+    features = model.tokenize([sentence])
+    with torch.no_grad():
+        pooled_output = features
+        for stage in list(model)[:-1]:      # everything except Normalize
+            pooled_output = stage(pooled_output)
+    pooled = pooled_output["sentence_embedding"][0]
+
+    # Not unit length, and not marginally so. A normalised vector cannot
+    # satisfy this, which is precisely why the assertion is worth making.
+    pooled_length = vector_norm(pooled.tolist())
+    assert pooled_length > 2.0, (
+        f"pooled vector has norm {pooled_length}, so it was already normalised "
+        "and this test can no longer distinguish normalised from raw"
+    )
+
+    # Normalising by hand reproduces the pipeline, so the Normalize stage is
+    # exactly this division -- direction preserved, length set to one.
+    full = model.encode(sentence)
+    manual = (pooled / pooled.norm()).tolist()
+    assert manual == pytest.approx(full.tolist(), abs=1e-6)
+    assert vector_norm(full.tolist()) == pytest.approx(1.0, abs=1e-6)
 
 
 def test_batch_size_zero_raises_error():
