@@ -45,8 +45,9 @@ build time* — `app/`, `tests/` and `pytest.ini` are `COPY`'d, not bind-mounted
 testing stale code. This has wasted more time on this project than any other
 single thing.
 
-Current state: 172 tests collected, 171 passing, 1 skipped (it needs Node.js,
-which the Python image does not have).
+Current state: 357 tests collected, 356 passing, 1 skipped (it needs Node.js,
+which the Python image does not have). 4 carry the `slow` marker, so
+`-m "not slow"` reports 352 passed and `-m slow` reports 4.
 
 ## Architecture
 

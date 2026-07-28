@@ -98,6 +98,43 @@ text, the first few vector components, the dimensionality, the L2 norm, and the
 full metadata. The norm reads `1.0` on every record — that is normalisation,
 visible rather than asserted.
 
+## The other half: `/chat`
+
+Indexing is only worth judging by what retrieval can then find, so `/chat` runs
+the query side and shows its working. Two columns: the conversation on the left,
+an inspector on the right.
+
+The inspector is the point. For every question it shows the query as a vector,
+then each stage with its timing — `embed_query → search → rank → filter →
+assemble` — then **every candidate the search returned**, not just the winners:
+its cosine distance *and* the similarity derived from it, its MMR score where
+relevant, its page citation, and for the losers, which stage eliminated it
+(`not_top_k`, `below_threshold`, `mmr_redundant`).
+
+Three controls change the outcome live:
+
+- **top-k** — how many chunks reach the answer
+- **MMR** with a λ slider — maximal marginal relevance, trading relevance against
+  diversity. At λ=1 it collapses to plain similarity; at λ=0 it maximises
+  variety. Watch the selected set change.
+- **minimum similarity** — and when nothing clears it, the answer is "I don't
+  know", with the rejected candidates still listed and scored
+
+That last state is the most useful thing on the page. A RAG system that
+confidently answers from nothing is the failure everyone ships; here it is a
+first-class, visible outcome rather than an error.
+
+`/chat` is always reachable and does not depend on this browser having run the
+pipeline — only on something being in ChromaDB. Open it with an empty collection
+and it tells you so.
+
+**Answers are extractive by default.** With no LLM configured the answer *is* the
+retrieved chunks with their citations, which keeps the line between "the
+retriever found this text" and "a model wrote this" visible. To add generation,
+point `OLLAMA_BASE_URL` at a local [Ollama](https://ollama.com) and note the
+catch: Ollama binds to `127.0.0.1`, so it refuses container traffic until you
+start it with `OLLAMA_HOST=0.0.0.0`. See `.env.example`.
+
 ## Bring your own document
 
 Drag any text-layer PDF onto step 1, up to 30 MB by default.
@@ -132,6 +169,12 @@ change any of them.
 | `MAX_UPLOAD_MB` | `30` | Upload size cap |
 | `CHROMA_HOST` / `CHROMA_PORT` | `chromadb` / `8000` | Vector store location |
 | `CHROMA_COLLECTION` | `workshop` | Collection name |
+| `RETRIEVAL_TOP_K` | `5` | Chunks retrieved per question on `/chat` |
+| `RETRIEVAL_MIN_SCORE` | `0.25` | Below this similarity, the answer is "I don't know" |
+| `RETRIEVAL_MMR_LAMBDA` | `0.5` | MMR relevance/diversity balance, 0–1 |
+| `RETRIEVAL_POOL_MULTIPLIER` | `4` | Candidates fetched per requested chunk, so MMR has runners-up |
+| `OLLAMA_BASE_URL` | *(unset)* | Set to enable generated answers; unset means extractive |
+| `OLLAMA_MODEL` | `deepseek-r1:1.5b` | Generation model, when enabled |
 
 ## Tech stack
 
@@ -176,8 +219,10 @@ app/
     chunkers.py        the five chunking strategies
     embedder.py        batched embedding with real progress
     store.py           ChromaDB writes and reads
-  templates/, static/  the single-page frontend
-tests/                 172 tests
+    retriever.py       query-time search, MMR, thresholds, the full trace
+    generator.py       optional Ollama answers, reasoning stripped
+  templates/, static/  the ingestion page and the chat page
+tests/                 357 tests
 rag-workshop.html      the workshop slide deck
 ```
 
@@ -207,10 +252,14 @@ redistributed here.
 
 ## Scope
 
-This is the **indexing half** of RAG: everything up to "the vectors are in the
-database." There is no retrieval, no reranking, no prompt and no LLM here —
-those are the second half of the workshop, and mixing them in would blur the
-point that indexing quality decides everything downstream.
+The five-step page at `/` is the **indexing half** of RAG: everything up to "the
+vectors are in the database." It deliberately stops there — no retrieval, no
+query, no LLM — because mixing the halves would blur the point that indexing
+quality decides everything downstream.
+
+`/chat` is the other half, kept on its own page for the same reason. It has no
+reranking and no agentic retrieval: one query, one search, one answer, with every
+intermediate value on screen.
 
 One deliberate inconsistency: the slide deck's code samples use LlamaIndex while
 this app uses LangChain. The concepts are identical and the deck is left as
