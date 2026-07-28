@@ -9,17 +9,21 @@
 /* ---------------------------------------------------------------------------
  * Design tokens, taken from the deck's palette
  * ------------------------------------------------------------------------ */
+/* ---------------------------------------------------------------------------
+ * Layer 1: primitives -- the deck's palette, verbatim
+ *
+ * These are raw values with no opinion about usage. Nothing outside this block
+ * should hardcode a colour; everything below refers to a semantic token, and
+ * the semantic tokens refer to these. That two-layer split is what lets the
+ * palette be retuned without auditing 240 declarations.
+ * ------------------------------------------------------------------------ */
 :root {
   --bg: #0a0f1e;
-  --panel: rgba(255, 255, 255, .045);
-  --panel2: rgba(255, 255, 255, .075);
   --ink: #e9eef9;
   --muted: #94a3c4;
 
-  /* Each accent carries a fixed meaning across the whole console, so colour is
-   * never decorative: cyan is "active / this is the live value", amber is
-   * "attention, something changed or was removed", pink is failure, violet
-   * marks vector data, green is success. */
+  /* Each accent carries a fixed meaning, assigned in layer 2. Colour is never
+   * decorative here. */
   --cyan: #38e0cf;
   --amber: #ffb547;
   --pink: #ff5c8a;
@@ -27,11 +31,80 @@
   --green: #5ddb8b;
 
   --line: rgba(255, 255, 255, .11);
-  --r: 14px;
 
   --sans: 'Chivo', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
   --display: 'Bricolage Grotesque', 'Chivo', ui-sans-serif, system-ui, sans-serif;
   --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+/* ---------------------------------------------------------------------------
+ * Layer 2: semantic tokens -- what a value MEANS
+ * ------------------------------------------------------------------------ */
+:root {
+  /* Surfaces, ordered by elevation. "sunken" is darker than the page because
+   * raw data should read as recessed into the panel, not floating above it. */
+  --surface-page: var(--bg);
+  --surface-raised: rgba(255, 255, 255, .045);
+  --surface-control: rgba(255, 255, 255, .075);
+  --surface-sunken: #070b16;
+
+  /* Text roles. --ink-data is slightly cooler and dimmer than --ink-body: it
+   * is for machine output (chunk bodies, JSON), which should not compete with
+   * the interface's own prose. Measured 14.4:1 on --surface-sunken. */
+  --ink-body: var(--ink);
+  --ink-muted: var(--muted);
+  --ink-data: #d3ddf2;
+  --ink-on-accent: #04121a;
+
+  /* State vocabulary. Every one of these is used for state, never decoration.
+   * active/selected is the only one that appears on an idle control. */
+  --state-active: var(--cyan);
+  --state-info: var(--cyan);
+  --state-warn: var(--amber);
+  --state-error: var(--pink);
+  --state-ok: var(--green);
+  --state-vector: var(--violet);
+  --focus-ring: var(--amber);
+
+  /* Type scale, fixed rem on a ~1.15 ratio. Not clamp(): this is tool UI read
+   * at one distance, and a heading that shrinks inside a narrow panel looks
+   * worse, not responsive. The floor is 12px rather than the 10.2px this file
+   * used to reach -- legible from the back of a room is the real constraint,
+   * and contrast alone does not buy that. */
+  --text-2xs: 0.75rem;      /* 12px -- dense metadata, badges */
+  --text-xs: 0.8125rem;     /* 13px -- labels, monospace readouts */
+  --text-sm: 0.875rem;      /* 14px -- controls, callouts */
+  --text-base: 0.9375rem;   /* 15px -- prose */
+  --text-lg: 1.0625rem;     /* 17px -- emphasised figures */
+  --text-xl: 1.3125rem;     /* 21px -- section headings */
+  --text-3xl: 2.75rem;      /* 44px -- page title */
+
+  /* Spacing scale. Values outside it are geometric alignment (rail and node
+   * offsets) and are commented where they appear. */
+  --sp-1: 0.25rem;
+  --sp-2: 0.375rem;
+  --sp-3: 0.5rem;
+  --sp-4: 0.625rem;
+  --sp-5: 0.75rem;
+  --sp-6: 1rem;
+  --sp-7: 1.25rem;
+  --sp-8: 1.5rem;
+  --sp-9: 2rem;
+  --sp-10: 2.5rem;
+
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 14px;
+  --r-pill: 999px;
+
+  /* Motion. 120-260ms: users are in a task, not watching choreography.
+   * ease-out-quint decelerates hard, so a transition reads as settling rather
+   * than sliding. No bounce anywhere. */
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+  --dur-slow: 260ms;
+  --ease-out: cubic-bezier(.22, 1, .36, 1);
+
 }
 
 /* ---------------------------------------------------------------------------
@@ -52,14 +125,14 @@
 }
 
 body {
-  background: var(--bg);
-  color: var(--ink);
+  background: var(--surface-page);
+  color: var(--ink-body);
   font-family: var(--sans);
   -webkit-font-smoothing: antialiased;
   line-height: 1.5;
   max-width: 1100px;
   margin: 0 auto;
-  padding: clamp(1rem, 3vw, 2.8rem);
+  padding: clamp(var(--sp-6), 3vw, var(--sp-10));
 }
 
 h1,
@@ -70,14 +143,14 @@ h3 {
 }
 
 h1 {
-  font-size: clamp(2rem, 5vw, 3.6rem);
+  font-size: var(--text-3xl);
   font-weight: 800;
   line-height: .98;
   max-width: 14ch;
 }
 
 h2 {
-  font-size: clamp(1.1rem, 2vw, 1.45rem);
+  font-size: var(--text-xl);
   font-weight: 700;
 }
 
@@ -91,21 +164,24 @@ input {
 
 button {
   font-family: var(--mono);
-  font-size: .75rem;
-  background: var(--panel2);
-  color: var(--ink);
+  font-size: var(--text-sm);
+  background: var(--surface-control);
+  color: var(--ink-body);
   border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: .5rem .82rem;
+  border-radius: var(--r-sm);
+  padding: var(--sp-3) var(--sp-5);
   cursor: pointer;
-  transition: border-color .15s, color .15s, background .15s;
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
 }
 
 /* :not(:disabled) matters. A locked step's buttons are disabled, and a hover
  * highlight on a control that cannot be used reads as an invitation. */
 button:hover:not(:disabled) {
-  color: var(--cyan);
-  border-color: var(--cyan);
+  color: var(--state-active);
+  border-color: var(--state-active);
 }
 
 button:disabled {
@@ -118,64 +194,66 @@ button:disabled {
  * is far worse than on a laptop screen. */
 button:focus-visible,
 input:focus-visible {
-  outline: 3px solid var(--amber);
+  outline: 3px solid var(--focus-ring);
   outline-offset: 3px;
 }
 
 button.pri {
-  background: var(--cyan);
-  border-color: var(--cyan);
-  color: #04121a;
+  background: var(--state-active);
+  border-color: var(--state-active);
+  color: var(--ink-on-accent);
   font-weight: 800;
 }
 
 button.pri:hover:not(:disabled) {
-  color: #04121a;
+  color: var(--ink-on-accent);
   filter: brightness(1.08);
 }
 
+/* A destructive control previews the error colour on hover, so the consequence
+ * is legible before the click rather than after it. */
 button.danger:hover:not(:disabled) {
-  border-color: var(--pink);
-  color: var(--pink);
+  border-color: var(--state-error);
+  color: var(--state-error);
 }
 
 /* ---------------------------------------------------------------------------
  * Masthead and shared text helpers
  * ------------------------------------------------------------------------ */
 .masthead {
-  margin: clamp(.5rem, 3vw, 2.5rem) 0 2rem;
+  margin: clamp(var(--sp-3), 3vw, var(--sp-10)) 0 var(--sp-9);
 }
 
 .masthead p {
-  color: var(--muted);
+  color: var(--ink-muted);
   max-width: 63ch;
-  margin-top: .8rem;
-  font-size: .93rem;
+  margin-top: var(--sp-5);
+  font-size: var(--text-base);
 }
 
 .hl {
-  color: var(--cyan);
+  color: var(--state-active);
   font-style: normal;
 }
 
 .muted {
-  color: var(--muted);
+  color: var(--ink-muted);
 }
 
 .mono {
   font-family: var(--mono);
-  font-size: .72rem;
+  font-size: var(--text-xs);
 }
 
 .eyebrow {
-  color: var(--cyan);
+  color: var(--state-active);
   display: flex;
   align-items: center;
-  gap: .6rem;
-  font: 700 .69rem/1 var(--mono);
+  gap: var(--sp-4);
+  font: 700 var(--text-xs)/1 var(--mono);
   letter-spacing: .15em;
   text-transform: uppercase;
-  margin-bottom: .8rem;
+  margin-bottom: var(--sp-5);
 }
 
 /* A trailing rule that fades out rather than stopping hard. */
@@ -206,17 +284,20 @@ button.danger:hover:not(:disabled) {
   top: 1.4rem;
   bottom: 2rem;
   width: 1px;
-  background: linear-gradient(var(--cyan), var(--violet) 55%, var(--line));
+  background: linear-gradient(var(--state-active), var(--state-vector) 55%, var(--line));
 }
 
 .step {
   position: relative;
   border: 1px solid var(--line);
-  border-radius: var(--r);
-  background: var(--panel);
-  padding: clamp(1rem, 2.5vw, 1.55rem);
-  margin-bottom: 1.1rem;
-  transition: opacity .25s, border-color .25s, transform .25s;
+  border-radius: var(--r-lg);
+  background: var(--surface-raised);
+  padding: clamp(var(--sp-6), 2.5vw, var(--sp-8));
+  margin-bottom: var(--sp-7);
+  transition:
+    opacity var(--dur-slow) var(--ease-out),
+    border-color var(--dur-slow) var(--ease-out),
+    transform var(--dur-slow) var(--ease-out);
 }
 
 /* The rail node. Its offset repeats .pipeline's padding expression so the node
@@ -226,12 +307,12 @@ button.danger:hover:not(:disabled) {
   position: absolute;
   width: 9px;
   height: 9px;
-  border: 2px solid var(--bg);
+  border: 2px solid var(--surface-page);
   border-radius: 50%;
-  background: var(--cyan);
+  background: var(--state-active);
   left: calc(clamp(0rem, 3vw, 2.3rem) * -1 - 5px);
   top: 1.72rem;
-  box-shadow: 0 0 0 1px var(--cyan);
+  box-shadow: 0 0 0 1px var(--state-active);
 }
 
 /* Server-driven: app.js writes these two attributes from the session's
@@ -243,77 +324,80 @@ button.danger:hover:not(:disabled) {
 }
 
 .step[data-active='true'] {
-  border-color: color-mix(in srgb, var(--cyan) 52%, transparent);
+  border-color: color-mix(in srgb, var(--state-active) 52%, transparent);
   box-shadow:
-    0 0 0 1px color-mix(in srgb, var(--cyan) 13%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--state-active) 13%, transparent),
     0 16px 40px rgba(0, 0, 0, .12);
 }
 
 .step[data-active='true']::before {
-  box-shadow: 0 0 0 1px var(--cyan), 0 0 20px var(--cyan);
+  box-shadow: 0 0 0 1px var(--state-active), 0 0 20px var(--state-active);
 }
 
 .step-head {
   display: flex;
   align-items: baseline;
-  gap: .7rem;
+  gap: var(--sp-5);
   flex-wrap: wrap;
 }
 
 .step-num,
 .step-state {
-  font: 700 .67rem/1 var(--mono);
+  font: 700 var(--text-2xs)/1 var(--mono);
   letter-spacing: .05em;
 }
 
 .step-num {
-  color: var(--cyan);
-  border: 1px solid color-mix(in srgb, var(--cyan) 50%, transparent);
-  padding: .18rem .45rem;
-  border-radius: 999px;
+  color: var(--state-active);
+  border: 1px solid color-mix(in srgb, var(--state-active) 50%, transparent);
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--r-pill);
 }
 
 .step-state {
-  color: var(--muted);
+  color: var(--ink-muted);
   margin-left: auto;
   text-transform: uppercase;
 }
 
 .step-body {
-  margin-top: 1rem;
+  margin-top: var(--sp-6);
   display: flex;
   flex-direction: column;
-  gap: .9rem;
+  gap: var(--sp-6);
 }
 
 /* ---------------------------------------------------------------------------
  * Step 1: the drop zone
  * ------------------------------------------------------------------------ */
 .drop {
+  /* Amber here means "this surface is awaiting your input" -- one of three
+   * roles amber carries in this system (see DESIGN.md). Dashed, because a
+   * dashed edge reads as a target rather than a container. */
   border: 1px dashed color-mix(in srgb, var(--amber) 62%, transparent);
   background: color-mix(in srgb, var(--amber) 7%, transparent);
-  border-radius: var(--r);
-  padding: 1.35rem;
+  border-radius: var(--r-lg);
+  padding: var(--sp-8);
   text-align: center;
-  font-size: .86rem;
+  font-size: var(--text-base);
 }
 
 .drop .muted {
-  margin-top: .45rem;
+  margin-top: var(--sp-3);
 }
 
 /* Added while a file is dragged over the zone: amber ("waiting for input")
  * becomes cyan ("this will accept the drop"). */
 .drop.over {
-  border-color: var(--cyan);
-  background: color-mix(in srgb, var(--cyan) 10%, transparent);
+  border-color: var(--state-active);
+  background: color-mix(in srgb, var(--state-active) 10%, transparent);
 }
 
 .ctl {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: .6rem;
+  gap: var(--sp-4);
 }
 
 /* ---------------------------------------------------------------------------
@@ -322,7 +406,7 @@ button.danger:hover:not(:disabled) {
 .strategies {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
-  gap: .65rem;
+  gap: var(--sp-4);
 }
 
 .strategy {
@@ -330,44 +414,44 @@ button.danger:hover:not(:disabled) {
   text-align: left;
   display: flex;
   flex-direction: column;
-  gap: .35rem;
-  padding: .75rem .8rem;
+  gap: var(--sp-2);
+  padding: var(--sp-5) var(--sp-5);
 }
 
 /* Selection is keyed off aria-pressed, so the accessible state and the visible
  * state cannot disagree -- there is no parallel "selected" class to forget to
  * update. */
 .strategy[aria-pressed='true'] {
-  border-color: var(--cyan);
-  background: color-mix(in srgb, var(--cyan) 13%, transparent);
+  border-color: var(--state-active);
+  background: color-mix(in srgb, var(--state-active) 13%, transparent);
 }
 
 .strategy b {
   font-family: var(--display);
-  font-size: 1rem;
+  font-size: var(--text-lg);
 }
 
 .strategy span {
-  color: var(--muted);
-  font: .7rem/1.4 var(--sans);
+  color: var(--ink-muted);
+  font: var(--text-xs)/1.4 var(--sans);
 }
 
 .sliders {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 1rem;
+  gap: var(--sp-6);
 }
 
 .rng {
   display: flex;
   flex-direction: column;
-  gap: .25rem;
-  color: var(--muted);
-  font: .72rem/1.3 var(--mono);
+  gap: var(--sp-1);
+  color: var(--ink-muted);
+  font: var(--text-xs)/1.3 var(--mono);
 }
 
 .rng b {
-  color: var(--cyan);
+  color: var(--state-active);
 }
 
 /* Semantic chunking ignores size and overlap entirely, so those sliders are
@@ -378,7 +462,7 @@ button.danger:hover:not(:disabled) {
 }
 
 input[type=range] {
-  accent-color: var(--cyan);
+  accent-color: var(--state-active);
   width: 100%;
 }
 
@@ -390,25 +474,25 @@ input[type=range] {
  * 44vh so a 400-chunk document scrolls within its own panel instead of burying
  * steps 4 and 5 far below the fold. */
 .preview {
-  background: #070b16;
+  background: var(--surface-sunken);
   border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: .65rem;
+  border-radius: var(--r-md);
+  padding: var(--sp-4);
   max-height: 44vh;
   overflow: auto;
   font-family: var(--mono);
-  font-size: .72rem;
+  font-size: var(--text-xs);
 }
 
 .empty {
-  color: var(--muted);
-  padding: .35rem;
+  color: var(--ink-muted);
+  padding: var(--sp-2);
 }
 
 .chunk,
 .record {
   border-bottom: 1px solid var(--line);
-  padding: .6rem .2rem;
+  padding: var(--sp-4) var(--sp-1);
 }
 
 .chunk:last-child,
@@ -418,11 +502,11 @@ input[type=range] {
 
 .chunk-meta {
   display: flex;
-  gap: .65rem;
+  gap: var(--sp-4);
   flex-wrap: wrap;
-  color: var(--cyan);
-  font-size: .65rem;
-  margin-bottom: .3rem;
+  color: var(--state-active);
+  font-size: var(--text-2xs);
+  margin-bottom: var(--sp-2);
 }
 
 /* overflow-wrap: anywhere, because fixed-size splitting breaks mid-word by
@@ -430,27 +514,29 @@ input[type=range] {
  * exactly that. pre-wrap keeps the whitespace the splitter actually produced,
  * which is part of what the room is inspecting. */
 .chunk-text {
-  color: #d3ddf2;
+  color: var(--ink-data);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
+/* Amber marks identifiers in machine output, distinct from the body text and
+ * from the vector. Its third role in this system. */
 .record-id {
   color: var(--amber);
-  font-size: .66rem;
+  font-size: var(--text-2xs);
 }
 
 /* Violet marks vector data throughout, matching the deck. */
 .record-vec {
-  color: var(--violet);
-  font-size: .66rem;
-  margin-top: .35rem;
+  color: var(--state-vector);
+  font-size: var(--text-2xs);
+  margin-top: var(--sp-2);
 }
 
 details {
-  color: var(--muted);
-  font-size: .66rem;
-  margin-top: .35rem;
+  color: var(--ink-muted);
+  font-size: var(--text-2xs);
+  margin-top: var(--sp-2);
 }
 
 summary {
@@ -460,7 +546,7 @@ summary {
 pre {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  margin-top: .3rem;
+  margin-top: var(--sp-2);
 }
 
 /* ---------------------------------------------------------------------------
@@ -469,8 +555,8 @@ pre {
 .stats {
   display: flex;
   flex-wrap: wrap;
-  gap: 1.2rem;
-  font: .71rem/1.3 var(--mono);
+  gap: var(--sp-7);
+  font: var(--text-xs)/1.3 var(--mono);
 }
 
 .stats div {
@@ -481,29 +567,29 @@ pre {
 /* Number above label, the number larger and in cyan: these counts are the
  * point of step 1, and they get read aloud from across a room. */
 .stats b {
-  color: var(--cyan);
-  font-size: 1.08rem;
+  color: var(--state-active);
+  font-size: var(--text-lg);
 }
 
 .stats span {
-  color: var(--muted);
-  font-size: .64rem;
+  color: var(--ink-muted);
+  font-size: var(--text-2xs);
 }
 
 /* One callout shape, recoloured through --c by a modifier class, so severity
  * is a single-token change instead of four near-duplicate rules. */
 .callout {
-  --c: var(--cyan);
+  --c: var(--state-info);
   border: 1px solid color-mix(in srgb, var(--c) 34%, transparent);
   background: color-mix(in srgb, var(--c) 8%, transparent);
-  border-radius: 10px;
-  padding: .6rem .8rem;
-  font-size: .78rem;
+  border-radius: var(--r-md);
+  padding: var(--sp-4) var(--sp-5);
+  font-size: var(--text-sm);
 }
 
-.callout.warn { --c: var(--amber); }
-.callout.err  { --c: var(--pink); }
-.callout.ok   { --c: var(--green); }
+.callout.warn { --c: var(--state-warn); }
+.callout.err  { --c: var(--state-error); }
+.callout.ok   { --c: var(--state-ok); }
 
 /* Restates the global [hidden] rule. .callout sets no display of its own
  * today, but being explicit keeps a later layout change from resurrecting a
@@ -515,8 +601,8 @@ pre {
 .bar {
   height: 8px;
   overflow: hidden;
-  border-radius: 4px;
-  background: var(--panel2);
+  border-radius: var(--r-sm);
+  background: var(--surface-control);
 }
 
 /* Width is driven by real per-batch progress reported by the server. The
@@ -526,8 +612,8 @@ pre {
   display: block;
   height: 100%;
   width: 0;
-  background: linear-gradient(90deg, var(--violet), var(--cyan));
-  transition: width .2s ease;
+  background: linear-gradient(90deg, var(--state-vector), var(--state-active));
+  transition: width var(--dur-base) var(--ease-out);
 }
 
 /* ---------------------------------------------------------------------------
@@ -535,11 +621,11 @@ pre {
  * ------------------------------------------------------------------------ */
 @media (max-width: 620px) {
   body {
-    padding: 1rem;
+    padding: var(--sp-6);
   }
 
   .pipeline {
-    padding-left: 1.15rem;
+    padding-left: var(--sp-7);
   }
 
   .rail {
@@ -556,9 +642,7 @@ pre {
     grid-template-columns: 1fr;
   }
 
-  /* margin-left: auto would push this off the row once the header wraps. */
-  .step-state {
-    width: 100%;
+  /* margin-left: auto would push this off the row once the header wraps. */ .step-state { width: 100%;
     margin-left: 0;
   }
 }
