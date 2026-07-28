@@ -5,17 +5,143 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>RAG Retrieval Chat</title>
   <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/chat.css">
 </head>
-<body>
-  <!--
-    Placeholder only. This page is wired up by app/main.py's GET /chat route
-    so tests can exercise the route and the API it talks to
-    (POST /api/chat, POST /api/chat/reset); a separate pass builds the real
-    template, CSS and JS. window.__STATE__ carries the same session view
-    index.html uses, chat entries included (each entry's full retrieval
-    trace is stripped -- see SessionState.to_json's docstring).
-  -->
-  <p>Retrieval chat placeholder.</p>
+<body class="chat-body">
+  <header class="masthead">
+    <div class="eyebrow">Query-time retrieval <span>•</span> The other half of RAG</div>
+    <h1>Ask the <em class="hl">index,</em> watch the pipeline.</h1>
+    <p>
+      This queries whatever is already in ChromaDB — it does not care whether
+      <em>this</em> browser ran the ingestion wizard.
+      <a href="/">Index a document</a> first if the collection is empty.
+    </p>
+  </header>
+
+  <div class="callout err" id="banner" role="alert" hidden></div>
+
+  <main class="chat-layout" aria-label="Retrieval chat">
+    <section class="chat-col" aria-label="Conversation">
+      <div class="chat-col-head">
+        <h2>Conversation</h2>
+        <button type="button" id="reset-chat" class="danger">Clear history</button>
+      </div>
+
+      <div class="history" id="history" aria-live="polite"></div>
+
+      <div class="empty-state" id="empty-state">
+        <p>Nothing asked yet. Retrieval runs against whatever is already embedded — try one of these:</p>
+        <div class="examples" id="examples">
+          <button type="button" class="example-q">What does this document cover?</button>
+          <button type="button" class="example-q">Summarise the key policy on this topic.</button>
+          <button type="button" class="example-q">Is there anything about approval limits?</button>
+        </div>
+      </div>
+
+      <form id="ask-form" class="ask-form">
+        <label for="message" class="sr-only">Your question</label>
+        <textarea id="message" rows="2" placeholder="Ask a question about the indexed document…" required></textarea>
+        <div class="ask-row">
+          <button type="submit" class="pri" id="send">Ask</button>
+          <span class="mono muted" id="ask-status" aria-live="polite"></span>
+        </div>
+      </form>
+
+      <details class="controls" id="controls">
+        <summary>Retrieval settings</summary>
+        <div class="ctl-grid">
+          <label class="rng">Top K <b id="top-k-out">{{ settings.retrieval_top_k }}</b>
+            <input type="range" id="top-k" min="1" max="20" step="1" value="{{ settings.retrieval_top_k }}">
+          </label>
+          <label class="field">Algorithm
+            <select id="algorithm">
+              <option value="similarity" selected>Similarity</option>
+              <option value="mmr">MMR (diverse)</option>
+            </select>
+          </label>
+          <label class="rng" id="mmr-lambda-label" data-disabled="true">MMR λ <b id="mmr-lambda-out">{{ settings.retrieval_mmr_lambda }}</b>
+            <input type="range" id="mmr-lambda" min="0" max="1" step="0.05" value="{{ settings.retrieval_mmr_lambda }}" disabled>
+          </label>
+          <label class="rng">Min score <b id="min-score-out">{{ settings.retrieval_min_score }}</b>
+            <input type="range" id="min-score" min="-1" max="1" step="0.01" value="{{ settings.retrieval_min_score }}">
+          </label>
+        </div>
+      </details>
+    </section>
+
+    <aside class="inspector" id="inspector" aria-label="Retrieval inspector" aria-live="polite">
+      <div class="callout err" id="mismatch-warning" hidden></div>
+
+      <h2>Retrieval trace</h2>
+      <p class="muted mono trace-note">
+        Chroma returns cosine <b>distance</b>; <b>similarity = 1 − distance</b>. Shown side by side below — confusing the two is the most common scoring bug in RAG.
+      </p>
+
+      <div class="empty-state" id="inspector-empty">
+        <p>Ask a question to see the pipeline run, stage by stage.</p>
+      </div>
+
+      <ol class="stages" id="stages">
+        <li class="stage" data-stage="embed_query">
+          <button type="button" class="stage-toggle" aria-expanded="false">
+            <span class="stage-name">embed_query</span>
+            <span class="stage-ms mono muted">not yet run</span>
+          </button>
+          <div class="stage-detail" hidden></div>
+        </li>
+        <li class="stage" data-stage="search">
+          <button type="button" class="stage-toggle" aria-expanded="false">
+            <span class="stage-name">search</span>
+            <span class="stage-ms mono muted">not yet run</span>
+          </button>
+          <div class="stage-detail" hidden></div>
+        </li>
+        <li class="stage" data-stage="rank">
+          <button type="button" class="stage-toggle" aria-expanded="false">
+            <span class="stage-name">rank</span>
+            <span class="stage-ms mono muted">not yet run</span>
+          </button>
+          <div class="stage-detail" hidden></div>
+        </li>
+        <li class="stage" data-stage="filter">
+          <button type="button" class="stage-toggle" aria-expanded="false">
+            <span class="stage-name">filter</span>
+            <span class="stage-ms mono muted">not yet run</span>
+          </button>
+          <div class="stage-detail" hidden></div>
+        </li>
+        <li class="stage" data-stage="assemble">
+          <button type="button" class="stage-toggle" aria-expanded="false">
+            <span class="stage-name">assemble</span>
+            <span class="stage-ms mono muted">not yet run</span>
+          </button>
+          <div class="stage-detail" hidden></div>
+        </li>
+      </ol>
+
+      <div class="candidates" id="candidates" hidden>
+        <h3>Candidates <span class="muted mono" id="candidate-count"></span></h3>
+        <div class="candidate-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">#</th>
+                <th scope="col">similarity</th>
+                <th scope="col">distance</th>
+                <th scope="col">mmr</th>
+                <th scope="col">page</th>
+                <th scope="col">status</th>
+              </tr>
+            </thead>
+            <tbody id="candidate-rows"></tbody>
+          </table>
+        </div>
+      </div>
+    </aside>
+  </main>
+
   <script>window.__STATE__ = {{ state | tojson }};</script>
+  <script src="/static/chat.js"></script>
 </body>
 </html>

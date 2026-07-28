@@ -1,0 +1,469 @@
+/* Retrieval-chat styles. Loaded after app.css and reusing its tokens --
+ * nothing in this file defines a colour, size or spacing value that is not
+ * already one of app.css's semantic tokens (see DESIGN.md). The two pages
+ * share one design system; this file only adds the layout and components
+ * /chat needs that /index does not.
+ *
+ * Register anchors, deliberately not a chat app: the conversation column
+ * reads like a normal message list, but the right-hand inspector is styled
+ * after Chrome DevTools' Network panel (a list whose rows expand into
+ * detail) and Postgres EXPLAIN ANALYZE (stage-by-stage cost read top to
+ * bottom) -- dense, inspectable, never decorative.
+ */
+
+/* The two-column layout wants more width than the single-column ingestion
+ * page; app.css's body rule is generic (no id/class hook), so this widens it
+ * only for the page that opted in, rather than touching app.css itself. */
+.chat-body {
+  max-width: 1400px;
+}
+
+.chat-layout {
+  display: grid;
+  grid-template-columns: 55fr 45fr;
+  gap: var(--sp-9);
+  align-items: start;
+}
+
+/* ---------------------------------------------------------------------------
+ * Shared small helpers
+ * ------------------------------------------------------------------------ */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.empty-state {
+  border: 1px dashed var(--line);
+  border-radius: var(--r-lg);
+  padding: var(--sp-7);
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+}
+
+.empty-state p {
+  margin-bottom: var(--sp-5);
+}
+
+.empty-state:last-child p {
+  margin-bottom: 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * Left column: conversation
+ * ------------------------------------------------------------------------ */
+.chat-col-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  margin-bottom: var(--sp-6);
+}
+
+.chat-col-head button {
+  font-size: var(--text-xs);
+  padding: var(--sp-2) var(--sp-4);
+}
+
+.history {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-7);
+  margin-bottom: var(--sp-7);
+}
+
+.history:empty {
+  margin-bottom: 0;
+}
+
+.examples {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.example-q {
+  text-align: left;
+  font-family: var(--sans);
+}
+
+.msg {
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--surface-raised);
+  overflow: hidden;
+}
+
+.msg-q,
+.msg-a {
+  padding: var(--sp-5) var(--sp-6);
+}
+
+.msg-q {
+  border-bottom: 1px solid var(--line);
+}
+
+.msg-role {
+  display: block;
+  font: 700 var(--text-2xs)/1 var(--mono);
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  margin-bottom: var(--sp-2);
+}
+
+.msg-q p {
+  font-size: var(--text-base);
+}
+
+/* Kind drives the accent colour of the answer's own role label -- the same
+ * "state, not decoration" rule as everywhere else in this system. */
+.msg-a[data-kind='generated'] .msg-role { color: var(--state-active); }
+.msg-a[data-kind='extractive'] .msg-role { color: var(--state-vector); }
+.msg-a[data-kind='unknown'] .msg-role { color: var(--ink-muted); }
+
+.msg-a-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-4);
+  margin-bottom: var(--sp-3);
+}
+
+.msg-kind-badge {
+  font: 700 var(--text-2xs)/1 var(--mono);
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line);
+  color: var(--ink-muted);
+}
+
+.msg-a[data-kind='generated'] .msg-kind-badge {
+  color: var(--state-active);
+  border-color: color-mix(in srgb, var(--state-active) 50%, transparent);
+}
+
+.msg-a[data-kind='extractive'] .msg-kind-badge {
+  color: var(--state-vector);
+  border-color: color-mix(in srgb, var(--state-vector) 50%, transparent);
+}
+
+.msg-a-body {
+  color: var(--ink-body);
+  font-size: var(--text-base);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Extractive answers are quoted straight out of the chunk store -- rendered
+ * in the machine-output ink so it never reads as the interface's own
+ * prose, matching .chunk-text/.record-vec elsewhere in this system. */
+.msg-a[data-kind='extractive'] .msg-a-body {
+  color: var(--ink-data);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+}
+
+/* A steady cursor while tokens are still arriving -- not a spinner, and not
+ * animated: it just marks "this line is still being written". */
+.msg-a-body[data-streaming='true']::after {
+  content: '▍';
+  color: var(--state-active);
+}
+
+.msg-a-citations {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-top: var(--sp-4);
+}
+
+.citation-chip {
+  font: var(--text-2xs)/1 var(--mono);
+  color: var(--amber);
+  border: 1px solid color-mix(in srgb, var(--amber) 40%, transparent);
+  border-radius: var(--r-pill);
+  padding: var(--sp-1) var(--sp-3);
+}
+
+.msg-a-meta {
+  margin-top: var(--sp-4);
+  font-size: var(--text-2xs);
+}
+
+.msg-a-error {
+  margin-top: var(--sp-4);
+}
+
+.msg-inspect {
+  margin-top: var(--sp-5);
+  font-size: var(--text-xs);
+}
+
+.msg-inspect[aria-pressed='true'] {
+  border-color: var(--state-active);
+  color: var(--state-active);
+}
+
+/* ---------------------------------------------------------------------------
+ * The ask form and its controls
+ * ------------------------------------------------------------------------ */
+.ask-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  margin-bottom: var(--sp-6);
+}
+
+textarea {
+  font: inherit;
+  font-family: var(--sans);
+  font-size: var(--text-base);
+  color: var(--ink-body);
+  background: var(--surface-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: var(--sp-5);
+  resize: vertical;
+  min-height: 4.5rem;
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+
+textarea:focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 3px;
+}
+
+.ask-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-5);
+}
+
+.controls summary {
+  font: 700 var(--text-xs)/1 var(--mono);
+  color: var(--ink-muted);
+  padding: var(--sp-2) 0;
+}
+
+.ctl-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-6);
+  margin-top: var(--sp-5);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  color: var(--ink-muted);
+  font: var(--text-xs)/1.3 var(--mono);
+}
+
+select {
+  font: inherit;
+  font-family: var(--sans);
+  font-size: var(--text-sm);
+  color: var(--ink-body);
+  background: var(--surface-control);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: var(--sp-3);
+}
+
+select:focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 3px;
+}
+
+/* ---------------------------------------------------------------------------
+ * Right column: the inspector
+ * ------------------------------------------------------------------------ */
+.inspector h2 {
+  margin-bottom: var(--sp-3);
+}
+
+.trace-note {
+  margin-bottom: var(--sp-6);
+}
+
+.trace-note b {
+  color: var(--ink-body);
+}
+
+/* --model_mismatch, in the error colour and at the top: the panel's one
+ * "stop and read this" moment. A mismatched embed model makes every
+ * similarity number below meaningless, so it outranks everything else. */
+#mismatch-warning {
+  margin-bottom: var(--sp-6);
+}
+
+.stages {
+  list-style: none;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface-sunken);
+  margin-bottom: var(--sp-7);
+}
+
+.stage {
+  border-bottom: 1px solid var(--line);
+}
+
+.stage:last-child {
+  border-bottom: 0;
+}
+
+.stage-toggle {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  width: 100%;
+  background: none;
+  border: 0;
+  border-radius: 0;
+  color: var(--ink-body);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  padding: var(--sp-4) var(--sp-5);
+  cursor: pointer;
+}
+
+.stage-toggle:hover {
+  color: var(--state-active);
+}
+
+.stage-name {
+  text-transform: lowercase;
+}
+
+/* A stage that has actually run gets the accent colour on its name -- run
+ * order is what "reading the pipeline top to bottom" means here, and this is
+ * the only cue for it. No timer, no animation: the trace already finished by
+ * the time the response lands, so a fake incremental reveal would be exactly
+ * the kind of manufactured progress CLAUDE.md rules out. */
+.stage[data-ran='true'] .stage-name {
+  color: var(--state-active);
+}
+
+.stage-ms {
+  font-variant-numeric: tabular-nums;
+}
+
+.stage-detail {
+  padding: 0 var(--sp-5) var(--sp-4);
+  color: var(--ink-muted);
+  font: var(--text-2xs)/1.5 var(--mono);
+  display: grid;
+  gap: var(--sp-1);
+}
+
+.candidates h3 {
+  font: 700 var(--text-sm)/1 var(--sans);
+  margin-bottom: var(--sp-4);
+}
+
+.candidate-table-wrap {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  overflow: auto;
+  max-height: 50vh;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font: var(--text-2xs)/1.3 var(--mono);
+}
+
+th,
+td {
+  text-align: left;
+  padding: var(--sp-3) var(--sp-4);
+  white-space: nowrap;
+}
+
+th {
+  position: sticky;
+  top: 0;
+  background: var(--surface-sunken);
+  color: var(--ink-muted);
+  font-weight: 700;
+  border-bottom: 1px solid var(--line);
+}
+
+.candidate-row {
+  cursor: pointer;
+  border-bottom: 1px solid var(--line);
+}
+
+.candidate-row:hover {
+  background: var(--surface-control);
+}
+
+.candidate-row:focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+/* Dimmed, but never past legible: a loser is still real evidence the room
+ * should be able to read, not a discarded row. */
+.candidate-row[data-selected='false'] {
+  color: var(--ink-muted);
+}
+
+.candidate-detail-row td {
+  white-space: normal;
+  background: var(--surface-page);
+}
+
+.candidate-detail {
+  padding: var(--sp-4);
+  color: var(--ink-data);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* One status badge, recoloured by rejected_reason -- the same pattern as
+ * .callout's --c modifier. "" (selected) is --state-ok; a candidate that was
+ * ranked in but lost to the threshold is --state-warn (the number was close);
+ * "not_top_k" is neutral (never even ranked); "mmr_redundant" is
+ * --state-vector, since it is specifically a vector-similarity rejection. */
+.status-badge {
+  --c: var(--ink-muted);
+  color: var(--c);
+  border: 1px solid color-mix(in srgb, var(--c) 45%, transparent);
+  border-radius: var(--r-pill);
+  padding: var(--sp-1) var(--sp-3);
+  white-space: nowrap;
+}
+
+.status-badge[data-reason=''] { --c: var(--state-ok); }
+.status-badge[data-reason='below_threshold'] { --c: var(--state-warn); }
+.status-badge[data-reason='mmr_redundant'] { --c: var(--state-vector); }
+
+/* ---------------------------------------------------------------------------
+ * Narrow screens: stack, inspector second (already true in DOM order --
+ * this only removes the two-column grid so that order takes effect).
+ * ------------------------------------------------------------------------ */
+@media (max-width: 1000px) {
+  .chat-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .candidate-table-wrap {
+    max-height: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .msg-a-body[data-streaming='true']::after {
+    animation: none;
+  }
+}

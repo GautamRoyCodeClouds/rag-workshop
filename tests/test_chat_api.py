@@ -315,3 +315,76 @@ class TestChatHistory:
         assert after.upload == before.upload
         assert after.chunking == before.chunking
         assert after.embedding == before.embedding
+
+
+class TestChatFrontend:
+    """Markup and asset contract for the /chat page itself: chat.html,
+    chat.css, chat.js. Distinct from TestChatPage above, which only checks
+    that the route doesn't gate on session progress -- these check what a
+    presenter and a screen reader actually see.
+    """
+
+    def test_page_has_both_columns_stage_names_and_controls(self, client):
+        body = client.get("/chat").text
+        # The two named columns from the brief -- chat on the left, the
+        # inspector on the right -- not just "some markup exists".
+        assert 'class="chat-col"' in body
+        assert 'id="inspector"' in body
+        # The five retrieval stages, in the fixed pipeline order the panel
+        # reads top to bottom: embed_query -> search -> rank -> filter ->
+        # assemble. Asserting all five by name, not just "a stage list
+        # exists", so removing one silently would fail this test.
+        for stage in ("embed_query", "search", "rank", "filter", "assemble"):
+            assert f'data-stage="{stage}"' in body
+        # The controls the brief calls out by name: top_k, algorithm,
+        # mmr_lambda (present but disabled until MMR is chosen), min_score.
+        assert 'id="top-k"' in body
+        assert 'id="algorithm"' in body
+        assert 'id="mmr-lambda"' in body and 'disabled' in body
+        assert 'id="min-score"' in body
+        assert 'id="message"' in body
+
+    def test_css_and_js_are_served_with_no_external_reference(self, client):
+        body = client.get("/chat").text
+        css = client.get("/static/chat.css")
+        js = client.get("/static/chat.js")
+        assert css.status_code == 200
+        assert js.status_code == 200
+        # The talk is presented offline (see CLAUDE.md); a CDN or font-host
+        # reference here would render blank with no network, exactly like
+        # the stock Swagger UI test_api.py already guards against.
+        combined = "\n".join((body, css.text, js.text)).lower()
+        assert "https://" not in combined
+        assert "http://" not in combined
+        assert "cdn." not in combined
+
+    def test_page_references_its_own_assets(self, client):
+        body = client.get("/chat").text
+        assert 'href="/static/app.css"' in body
+        assert 'href="/static/chat.css"' in body
+        assert 'src="/static/chat.js"' in body
+
+    def test_state_is_injected_and_tojson_escapes_a_script_close_tag(self, client):
+        # A chat answer's text is arbitrary retrieved document content, so a
+        # chunk that happens to contain "</script>" must not be able to break
+        # out of the inline <script> block below it. Jinja's tojson filter
+        # escapes "<" to "\u003c" for exactly this reason -- this pins that
+        # chat.html actually renders state through that filter, not a raw
+        # string interpolation that would skip the escaping.
+        state = main_module.store.get_or_create(None)
+        state.chat = [{
+            "message_id": "m1",
+            "question": "one",
+            "answer": {
+                "kind": "extractive",
+                "text": "</script><script>alert(1)</script>",
+                "citations": [],
+            },
+            "generation": {"available": False, "model": "m", "detail": "", "job_id": None},
+        }]
+        main_module.store.save(state)
+
+        body = client.get("/chat", cookies={"rag_session": state.session_id}).text
+        assert "window.__STATE__" in body
+        assert "</script><script>alert(1)</script>" not in body
+        assert "\\u003c/script\\u003e" in body
