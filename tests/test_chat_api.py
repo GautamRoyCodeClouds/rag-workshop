@@ -216,6 +216,37 @@ class TestChatAnswerStates:
         assert response.status_code == 400
         assert "-1" in response.json()["detail"] and "1" in response.json()["detail"]
 
+    @pytest.mark.parametrize("mmr_lambda", [5.0, -3.0, 1.01])
+    def test_out_of_range_mmr_lambda_is_400(self, client, mmr_lambda):
+        """min_score was range-checked and mmr_lambda was not, so 5.0 and -3.0
+        both returned 200.
+
+        Not merely inconsistent. MMR scores lambda*sim - (1 - lambda)*redundancy,
+        so at lambda=5 the second term becomes -(1-5) = +4 times redundancy: the
+        ranking starts actively *rewarding* near-duplicate chunks, while the
+        panel keeps labelling the column "MMR score". The room would be shown
+        confident, wrong numbers -- and every one of this project's worst bugs
+        has been exactly that.
+        """
+        response = client.post(
+            "/api/chat",
+            json={"message": "hi", "algorithm": "mmr", "mmr_lambda": mmr_lambda},
+        )
+        assert response.status_code == 400
+        assert "mmr_lambda" in response.json()["detail"]
+
+    def test_lambda_at_both_ends_of_the_range_is_accepted(self, client, monkeypatch):
+        # The boundaries are meaningful values, not edge cases to reject: 0 is
+        # "diversity only" and 1 is "relevance only", the two ends the panel
+        # lets a presenter contrast. A naive exclusive check would break both.
+        use_fake_embeddings(monkeypatch, [1.0, 0.0])
+        for mmr_lambda in (0.0, 1.0):
+            response = client.post(
+                "/api/chat",
+                json={"message": "hi", "algorithm": "mmr", "mmr_lambda": mmr_lambda},
+            )
+            assert response.status_code == 200, mmr_lambda
+
     def test_unknown_algorithm_is_400(self, client):
         response = client.post("/api/chat", json={"message": "hi", "algorithm": "bogus"})
         assert response.status_code == 400

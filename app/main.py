@@ -686,6 +686,17 @@ async def chat(request: Request) -> Response:
         mmr_lambda = float(body.get("mmr_lambda", settings.retrieval_mmr_lambda))
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail="mmr_lambda must be a number.") from exc
+    # Range-checked for the same reason min_score is, and it matters more here.
+    # MMR scores lambda*sim - (1 - lambda)*redundancy. Outside [0, 1] that stops
+    # meaning anything: at lambda=5 the second term becomes -(1-5) = +4 times
+    # redundancy, so the ranking actively *rewards* near-duplicate chunks while
+    # the panel still labels the column "MMR score". A wrong number presented
+    # confidently to a room is the exact failure this codebase keeps producing.
+    if not (0.0 <= mmr_lambda <= 1.0):
+        raise HTTPException(
+            status_code=400,
+            detail="mmr_lambda must be between 0 and 1 (0 = diversity only, 1 = relevance only).",
+        )
 
     # _collection() raises a 503 HTTPException on its own -- validation above
     # must run before this, so a bad request body is a 400 even when Chroma
@@ -726,6 +737,21 @@ async def chat(request: Request) -> Response:
             status = await asyncio.to_thread(probe, settings.ollama_base_url, settings.ollama_model)
 
         if status is not None and status.available:
+            # Registered under this session's own id, which makes the
+            # relationship with ingestion jobs deliberately one-way:
+            #
+            #   chat -> ingestion:  no effect. This route never calls
+            #     claim_session, so asking a question cannot cancel a running
+            #     chunk or embed.
+            #   ingestion -> chat:  cancels. Every ingestion route claims the
+            #     session, and claim_session cancels *every* running job under
+            #     that id, this one included.
+            #
+            # That asymmetry is wanted, not incidental. A streaming answer's
+            # citations describe the vectors that existed when retrieval ran, so
+            # a re-embed or a "Reset everything" underneath it makes the rest of
+            # that answer describe a collection that no longer exists. Killing
+            # it is more honest than finishing it against stale retrieval.
             job = registry.create(state.session_id)
             prompt = build_prompt(
                 message,
