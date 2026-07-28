@@ -158,6 +158,30 @@ tests/                 172 tests
 rag-workshop.html      the workshop slide deck
 ```
 
+## Contributing
+
+Bug reports and pull requests are welcome. Read
+[CONTRIBUTING.md](CONTRIBUTING.md) first — it is short, and it covers the three
+rules that are not negotiable here (no PDF is ever committed, progress is never
+faked, comments must be true) plus how this project tests. The short version of
+that last part: a green suite is not evidence, so break your implementation on
+purpose and confirm your test fails before trusting it.
+
+## Licence
+
+[MIT](LICENSE) — use it, fork it, teach from it. Attribution appreciated but
+not required.
+
+The slide deck (`rag-workshop.html`) is covered by the same licence. Its code
+samples use LlamaIndex while this app uses LangChain; see Scope below.
+
+Third-party components keep their own licences, all permissive: FastAPI and
+LangChain (MIT), ChromaDB, sentence-transformers and transformers (Apache-2.0),
+uvicorn and Jinja2 (BSD). The embedding model,
+[all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2),
+is Apache-2.0 and is downloaded into the Docker image at build time rather than
+redistributed here.
+
 ## Scope
 
 This is the **indexing half** of RAG: everything up to "the vectors are in the

@@ -1,0 +1,39 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # The lock file pins the exact resolved versions the image is built from,
+      # so CI tests what contributors actually run.
+      - name: Install dependencies
+        run: pip install -r requirements.lock.txt -r requirements-dev.txt
+
+      # Only the fast tests. The `slow` ones download a ~90MB model, which the
+      # Docker image bakes in at build time -- see CONTRIBUTING.md for running
+      # them locally.
+      - name: Run tests
+        run: pytest -q -m "not slow"
+        env:
+          PYTHONPATH: .
+
+      # Cheap guard for the rule that matters most in this repository.
+      - name: No PDF may be committed
+        run: |
+          if git ls-files | grep -i '\.pdf$'; then
+            echo "::error::A PDF is tracked. No document may ever be committed here."
+            exit 1
+          fi
+          echo "no PDF tracked"

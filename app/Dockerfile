@@ -42,5 +42,21 @@ COPY tests/ /srv/tests/
 COPY pytest.ini /srv/pytest.ini
 COPY docker-compose.yml /srv/docker-compose.yml
 
+# Vendor Swagger UI for the same reason the model is baked in above: FastAPI's
+# stock docs page pulls its JS and CSS from cdn.jsdelivr.net and renders blank
+# with no network. Fetch once at build, serve locally at runtime. Downloaded
+# here rather than committed, so app/static/vendor/ is gitignored.
+RUN python - <<'PY'
+import urllib.request
+from pathlib import Path
+
+base = "https://cdn.jsdelivr.net/npm/swagger-ui-dist@5"
+target = Path("/srv/app/static/vendor")
+target.mkdir(parents=True, exist_ok=True)
+for name in ("swagger-ui-bundle.js", "swagger-ui.css"):
+    urllib.request.urlretrieve(f"{base}/{name}", target / name)
+    print("vendored", name)
+PY
+
 EXPOSE 8080
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]

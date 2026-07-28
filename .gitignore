@@ -58,5 +58,15 @@ hf_home/
 # SDD scratch
 .superpowers/
 
+# Internal spec and implementation plan: kept locally, not published. The plan
+# contains superseded reference code -- four bugs were found and fixed during
+# execution -- so shipping it would hand readers broken versions of logic the
+# repo now gets right. app/ is the source of truth.
+docs/superpowers/
+
+# Swagger UI assets, vendored into the image at build time rather than
+# committed. See the RUN step in app/Dockerfile.
+app/static/vendor/
+
 # Knowledge-graph output from the graphify skill (regenerable, 1.5M)
 graphify-out/

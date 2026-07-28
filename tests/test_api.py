@@ -103,6 +103,29 @@ class TestPage:
         assert "http://" not in combined
         assert "https://" not in combined
 
+    def test_the_api_docs_page_loads_no_external_assets(self, client):
+        """FastAPI's stock Swagger page fetches its JS and CSS from
+        cdn.jsdelivr.net, so it renders blank at a talk presented with no
+        network. The assets are vendored into the image instead; this pins that
+        the served page references only local paths.
+
+        Asserting merely that /api/docs returns 200 would pass against the
+        CDN-backed default, since the HTML shell loads fine and only the assets
+        fail -- which is exactly how this shipped unnoticed.
+        """
+        body = client.get("/api/docs").text
+        assert "swagger-ui" in body.lower(), "not a Swagger UI page"
+        assert "cdn.jsdelivr.net" not in body
+        assert "https://" not in body
+        assert "/static/vendor/swagger-ui-bundle.js" in body
+        assert "/static/vendor/swagger-ui.css" in body
+
+    def test_the_openapi_schema_is_still_served(self, client):
+        # Disabling the built-in docs page must not take the schema with it.
+        schema = client.get("/openapi.json").json()
+        assert schema["info"]["title"] == "RAG Ingestion Pipeline"
+        assert "/api/collection" in schema["paths"]
+
     def test_the_stylesheet_keeps_hidden_controls_out_of_the_layout(self, client):
         # The rule matters, its formatting does not: several rules set `display`
         # on elements the frontend hides with the `hidden` attribute, so without

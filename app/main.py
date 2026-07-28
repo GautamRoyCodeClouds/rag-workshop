@@ -10,6 +10,7 @@ from pathlib import Path
 
 import chromadb
 from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -33,9 +34,34 @@ async def lifespan(_app):
     await registry.shutdown()
 
 
-app = FastAPI(title="RAG Ingestion Pipeline", docs_url="/api/docs", lifespan=lifespan)
+# docs_url=None disables FastAPI's built-in Swagger page, which is replaced
+# below. The stock one loads its JavaScript and CSS from cdn.jsdelivr.net, so it
+# renders blank with no network -- and this app is presented offline.
+app = FastAPI(
+    title="RAG Ingestion Pipeline",
+    docs_url=None,
+    redoc_url=None,
+    lifespan=lifespan,
+)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
+
+
+@app.get("/api/docs", include_in_schema=False)
+def api_docs():
+    """Swagger UI served from assets vendored into the image at build time.
+
+    Same trick as the embedding model: fetch it once while building, so runtime
+    needs no network. app/static/vendor/ is populated by the Dockerfile and is
+    gitignored -- downloaded, not committed.
+    """
+    return get_swagger_ui_html(
+        openapi_url=app.openapi_url,
+        title="RAG Ingestion Pipeline - API",
+        swagger_js_url="/static/vendor/swagger-ui-bundle.js",
+        swagger_css_url="/static/vendor/swagger-ui.css",
+        swagger_favicon_url="data:,",
+    )
 
 
 class MalformedSessionError(Exception):
