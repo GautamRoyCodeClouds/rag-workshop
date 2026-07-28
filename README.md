@@ -17,6 +17,29 @@ RAG system fails during *indexing* — long before anyone writes a prompt.
 Each step unlocks only when the previous one succeeds, so the dependency chain is
 impossible to miss. **Bring your own PDF** — anything with a real text layer.
 
+## Intended use
+
+This is teaching software. It is built to be read, projected, and argued with
+during a two-hour session, and it is deliberately small enough to hold in your
+head. That shape is a series of trade-offs, and they are not ones to carry into
+a deployment:
+
+- **No authentication or authorisation.** Every endpoint is open, including the
+  one that drops the collection.
+- **Single process, single presenter.** Job and session state live in memory,
+  so running more than one worker breaks progress reporting and step unlocking.
+- **The collection is shared.** Step 5 lists every record in the database,
+  regardless of which session wrote it.
+- **The upload limit is advisory.** The request body is fully received before
+  its size can be checked, and there is no rate limiting.
+- **Nothing is hardened for an untrusted network.** The session cookie is not
+  `Secure`, there is no CSRF protection, and ChromaDB runs without credentials.
+
+Each is a sensible simplification for a demo on a laptop and a liability
+anywhere else. The durable part is the pipeline itself — loading, cleaning,
+chunking, embedding, storing, and the decisions inside each stage. The web app
+around it is scaffolding for making those decisions visible.
+
 ## Quick start
 
 You need Docker and about 2 GB of disk (the embedding model is baked into the
