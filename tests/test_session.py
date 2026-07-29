@@ -216,6 +216,11 @@ class TestPersistence:
     ):
         store = make_store(tmp_path)
         requested_id = "requestedvalidid"
+        # Created explicitly: the constructor no longer mkdirs (importing this
+        # module must not write to disk -- see SessionStore.__init__), and this
+        # test plants a file directly rather than going through save(), which is
+        # what would otherwise create the directory.
+        store.data_dir.mkdir(parents=True, exist_ok=True)
         store._path(requested_id).write_text(
             json.dumps(
                 {
@@ -261,6 +266,46 @@ class TestPersistence:
             store.save(state)
         with pytest.raises(ValueError):
             store.get_or_create("a/b")
+
+class TestNoImportTimeFilesystemWrites:
+    """Constructing a SessionStore must not touch the filesystem.
+
+    `store = SessionStore()` runs at module scope in app/session.py, so a
+    constructor that created directories would make merely *importing*
+    app.session write to settings.data_dir -- /data by default. Inside the
+    container that is a writable volume and nothing looks wrong. On a machine
+    where /data does not exist and cannot be created it raises PermissionError
+    during import, so every module that transitively imports app.session fails
+    at collection rather than at a test.
+
+    That is not hypothetical: it is exactly how the first real CI run failed,
+    with three test modules erroring before a single test executed.
+    """
+
+    def test_construction_creates_nothing_on_disk(self, tmp_path):
+        target = tmp_path / "never-created"
+        store = SessionStore(data_dir=target)
+        assert not target.exists()
+        assert not store.data_dir.exists()
+
+    def test_save_creates_the_directory_on_first_write(self, tmp_path):
+        # The other half of the contract: deferring the mkdir must not mean
+        # never doing it.
+        store = SessionStore(data_dir=tmp_path / "made-on-demand")
+        state = store.get_or_create(None)
+        store.save(state)
+        assert store.data_dir.is_dir()
+        assert store._path(state.session_id).is_file()
+
+    def test_get_or_create_tolerates_a_missing_directory(self, tmp_path):
+        # Reading must not require the directory either: Path.is_file() is
+        # False under a missing parent, which is already the "no session on
+        # disk" case, so no mkdir belongs on the read path.
+        store = SessionStore(data_dir=tmp_path / "absent")
+        state = store.get_or_create("doesnotexist123")
+        assert state.unlocked_step() == 1
+        assert not store.data_dir.exists()
+
 
 class TestUploadedFileCleanup:
     """Clearing a session must also remove the document it ingested.

@@ -151,8 +151,19 @@ class SessionStore:
     def __init__(self, data_dir: Path | None = None):
         self.root = Path(data_dir or settings.data_dir)
         self.data_dir = self.root / "sessions"
-        self.data_dir.mkdir(parents=True, exist_ok=True)
         self._live: dict[str, SessionState] = {}
+        # Deliberately no mkdir here. The module-level `store` below is built at
+        # import time, so creating directories in this constructor makes merely
+        # importing app.session a filesystem write against settings.data_dir
+        # (/data by default). Inside the container that is a writable volume; on
+        # any machine where /data does not exist and cannot be created -- a CI
+        # runner, a bare checkout -- the import raises PermissionError and every
+        # module that transitively imports this one fails to collect. That is
+        # exactly what broke the first real CI run.
+        #
+        # save() creates the directory on first write instead. get_or_create
+        # needs nothing: Path.is_file() is False for a path under a missing
+        # directory, which is already the "no session on disk" case.
 
     def _path(self, session_id: str) -> Path:
         # Session ids arrive from a client-supplied cookie or header (Task 7
@@ -249,6 +260,9 @@ class SessionStore:
         there is no fsync before `replace`.
         """
         target = self._path(state.session_id)
+        # Created here rather than in __init__ so importing this module never
+        # writes to the filesystem -- see the constructor's comment.
+        self.data_dir.mkdir(parents=True, exist_ok=True)
         self._live[state.session_id] = state
         temp = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
         temp.write_text(json.dumps(state.to_disk(), indent=2))
