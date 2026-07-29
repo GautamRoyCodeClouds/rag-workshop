@@ -45,6 +45,8 @@ app = FastAPI(
     redoc_url=None,
     lifespan=lifespan,
 )
+
+
 class RevalidatingStaticFiles(StaticFiles):
     """Static assets that always revalidate before being reused.
 
