@@ -45,7 +45,30 @@ app = FastAPI(
     redoc_url=None,
     lifespan=lifespan,
 )
-app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
+class RevalidatingStaticFiles(StaticFiles):
+    """Static assets that always revalidate before being reused.
+
+    Starlette sends ETag and Last-Modified but no Cache-Control, and with no
+    explicit directive browsers fall back to *heuristic* caching: they may reuse
+    a stored copy without asking whether it changed. That bites hard here.
+    Assets are baked into the image, so rebuilding -- or switching branch and
+    rebuilding -- replaces the file behind an unchanged URL. A presenter then
+    gets the previous build's chat.js with no error to explain it: the new markup
+    renders, but its handlers are never bound, so buttons silently do nothing.
+    That happened during testing and cost real time to diagnose.
+
+    "no-cache" means "revalidate", not "do not store": the browser still caches
+    but must confirm freshness, and the existing ETag turns that into a cheap
+    304. Over loopback, for a handful of KB, the round trip is free.
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+app.mount("/static", RevalidatingStaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
 
