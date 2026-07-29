@@ -21,7 +21,6 @@ from app.jobs import registry, sse_format
 from app.pipeline import store as vector_store
 from app.pipeline.chunkers import STRATEGIES, UnknownStrategyError, chunk
 from app.pipeline.embedder import build_embeddings, embed_batched
-from app.pipeline.generator import build_prompt, probe, stream_answer
 from app.pipeline.loader import EmptyDocumentError, load_pdf
 from app.pipeline.retriever import Candidate, retrieve
 from app.pipeline.store import get_client
@@ -612,12 +611,11 @@ def _citation(candidate: Candidate) -> dict:
 def _extractive_answer(selected: list[Candidate]) -> str:
     """Assemble an answer straight from the selected chunks, no LLM involved.
 
-    This is what the room sees whenever Ollama is not configured or not
-    reachable -- the common case, since the app is offline by default. It is
+    This is the only kind of answer /api/chat ever produces. It is
     deliberately just the chunks themselves with their citations, not a
     summary: manufacturing prose here would blur the line this whole feature
     exists to show, between "the retriever found this text" and "a model
-    said this".
+    said this" -- and this app never runs a model.
     """
     blocks = []
     for i, candidate in enumerate(selected, start=1):
@@ -653,9 +651,10 @@ async def chat(request: Request) -> Response:
 
     Retrieval runs synchronously -- the transparency panel must be fully
     populated before any answer appears, in either the "I don't know" or the
-    extractive/generated case, and that ordering is the actual point being
-    taught here, not an implementation detail. Only the optional generated
-    answer streams, over the same job registry the ingestion pipeline uses.
+    extractive case, and that ordering is the actual point being taught here,
+    not an implementation detail. The answer itself is always assembled
+    straight from the retrieved chunks: no LLM is involved anywhere in this
+    app, so there is nothing to stream and no job is created for chat.
     """
     state = _session(request)
     body = await _request_body(request)
@@ -729,80 +728,19 @@ async def chat(request: Request) -> Response:
             else "nothing retrieved scored above the similarity threshold"
         )
         answer = {"kind": "unknown", "text": f"I don't know -- {reason}.", "citations": []}
-        generation = {"available": False, "model": settings.ollama_model, "detail": "", "job_id": None}
     else:
         citations = [_citation(c) for c in trace.selected]
-        status = None
-        if settings.ollama_base_url:
-            status = await asyncio.to_thread(probe, settings.ollama_base_url, settings.ollama_model)
-
-        if status is not None and status.available:
-            # Registered under this session's own id, which makes the
-            # relationship with ingestion jobs deliberately one-way:
-            #
-            #   chat -> ingestion:  no effect. This route never calls
-            #     claim_session, so asking a question cannot cancel a running
-            #     chunk or embed.
-            #   ingestion -> chat:  cancels. Every ingestion route claims the
-            #     session, and claim_session cancels *every* running job under
-            #     that id, this one included.
-            #
-            # That asymmetry is wanted, not incidental. A streaming answer's
-            # citations describe the vectors that existed when retrieval ran, so
-            # a re-embed or a "Reset everything" underneath it makes the rest of
-            # that answer describe a collection that no longer exists. Killing
-            # it is more honest than finishing it against stale retrieval.
-            job = registry.create(state.session_id)
-            prompt = build_prompt(
-                message,
-                [{"text": c.text, "metadata": c.metadata} for c in trace.selected],
-            )
-            base_url, model = settings.ollama_base_url, settings.ollama_model
-
-            def run_generation() -> None:
-                try:
-                    for delta in stream_answer(base_url, model, prompt):
-                        registry.publish(job, {"type": "token", "text": delta})
-                    registry.finish(job, "done")
-                except Exception as exc:  # noqa: BLE001 - delivered to the job UI
-                    registry.finish(job, "error", f"{type(exc).__name__}: {exc}")
-
-            # stream_answer is a blocking (urllib-based) generator, same as
-            # every other transport call in this file -- to_thread keeps the
-            # event loop free, same reasoning as _document_text/build_embeddings
-            # above.
-            registry.register_task(job, asyncio.create_task(asyncio.to_thread(run_generation)))
-            answer = {"kind": "generated", "text": "", "citations": citations}
-            generation = {
-                "available": True,
-                "model": settings.ollama_model,
-                "detail": "",
-                "job_id": job.job_id,
-            }
-        else:
-            detail = (
-                status.detail
-                if status is not None
-                else "OLLAMA_BASE_URL is not set -- generation is disabled by default, offline-first."
-            )
-            answer = {
-                "kind": "extractive",
-                "text": _extractive_answer(trace.selected),
-                "citations": citations,
-            }
-            generation = {
-                "available": False,
-                "model": settings.ollama_model,
-                "detail": detail,
-                "job_id": None,
-            }
+        answer = {
+            "kind": "extractive",
+            "text": _extractive_answer(trace.selected),
+            "citations": citations,
+        }
 
     trace_json = _trace_to_json(trace)
     state.chat.append({
         "message_id": message_id,
         "question": message,
         "answer": answer,
-        "generation": generation,
         "trace": trace_json,
     })
     await asyncio.to_thread(store.save, state)
@@ -811,7 +749,6 @@ async def chat(request: Request) -> Response:
         "message_id": message_id,
         "question": message,
         "answer": answer,
-        "generation": generation,
         "trace": trace_json,
         "history_length": len(state.chat),
     })

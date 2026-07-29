@@ -68,8 +68,8 @@ citations shown to a room. `page_for_offset` lives in exactly one place
 Documented in `CLAUDE.md`. Briefly: the raw `chromadb` client instead of
 `langchain-chroma` (the wrapper computes embeddings internally, which would make
 per-batch progress and the vector preview impossible); the slide deck's samples
-using LlamaIndex while the app uses LangChain; `unlocked_step()` never returning
-3; and `ollama_base_url` being read by nothing.
+using LlamaIndex while the app uses LangChain; and `unlocked_step()` never
+returning 3.
 
 ## Pull requests
 

@@ -19,10 +19,10 @@ clarity and honesty about what is really happening outrank cleverness.
 Steps 1–5 (the ingestion wizard at `/`) stop at "the vectors are in the
 database, here they are" — no retrieval, query, or LLM call happens there. A
 separate, always-reachable `/chat` page runs the query half: `POST /api/chat`
-retrieves against whatever is already in ChromaDB and optionally generates an
-answer over Ollama. It does not depend on this browser's session having run
-the ingestion pipeline at all — only on what some session, at some point, has
-already embedded.
+retrieves against whatever is already in ChromaDB and answers extractively,
+straight from the retrieved chunks — no LLM runs anywhere in this app. It does
+not depend on this browser's session having run the ingestion pipeline at all
+— only on what some session, at some point, has already embedded.
 
 ## Commands
 
@@ -45,9 +45,9 @@ build time* — `app/`, `tests/` and `pytest.ini` are `COPY`'d, not bind-mounted
 testing stale code. This has wasted more time on this project than any other
 single thing.
 
-Current state: 357 tests collected, 356 passing, 1 skipped (it needs Node.js,
+Current state: 245 tests collected, 244 passing, 1 skipped (it needs Node.js,
 which the Python image does not have). 4 carry the `slow` marker, so
-`-m "not slow"` reports 352 passed and `-m slow` reports 4.
+`-m "not slow"` reports 240 passed and `-m slow` reports 4.
 
 ## Architecture
 
@@ -59,7 +59,6 @@ which the Python image does not have). 4 carry the `slow` marker, so
 | `app/pipeline/embedder.py` | Cached model load, `embed_batched` with genuine per-batch progress |
 | `app/pipeline/store.py` | ChromaDB writes with delete-before-write, plus the record browser read |
 | `app/pipeline/retriever.py` | Query-time retrieval: similarity/MMR ranking, the full `RetrievalTrace` |
-| `app/pipeline/generator.py` | Optional Ollama generation: `probe`, prompt assembly, reasoning-stripped streaming |
 | `app/session.py` | Per-session state, the server-side unlock rule, JSON mirror to disk |
 | `app/jobs.py` | Job registry: generation-based invalidation, cursor-resumable SSE |
 | `app/main.py` | FastAPI routes |
@@ -73,12 +72,10 @@ polling fallback → `GET /api/collection` paginates stored records.
 Chat is a separate flow, not a sixth pipeline step: `POST /api/chat` runs
 retrieval synchronously (the transparency panel must be populated before any
 answer appears) and returns the full trace plus an answer in the same
-response. When Ollama is configured and reachable that answer is `"kind":
-"generated"` with a `job_id`, and the tokens stream over the same
-`/api/events/{job_id}` machinery the ingestion pipeline uses; otherwise it is
-`"extractive"` (assembled straight from the retrieved chunks) or `"unknown"`
-(an honest "I don't know" — empty collection or nothing cleared the
-threshold, never an error).
+response. The answer's `"kind"` is `"extractive"` (assembled straight from the
+retrieved chunks) or `"unknown"` (an honest "I don't know" — empty collection
+or nothing cleared the threshold, never an error). No LLM runs anywhere in
+this app, so there is nothing to stream and no job is ever created for chat.
 
 ## Hard rules
 
@@ -166,12 +163,10 @@ verbally. Do not edit the deck to match the app.
 return of `2` already means both are reachable. This is deliberate and is
 documented at the function.
 
-**`ollama_base_url` backs `POST /api/chat`'s optional generation step.** When
-set, and `probe()` reports the configured `ollama_model`
-(`deepseek-r1:1.5b` by default) available, the chat streams a real generated
-answer through the job registry. Left unset (the default) the chat still
-works, falling back to an extractive answer assembled from the retrieved
-chunks — the app stays offline-first with no network and no Ollama at all.
+**No LLM runs anywhere in this app.** `POST /api/chat` always answers
+extractively, straight from the retrieved chunks — that is what keeps the app
+offline-first with no network required. Answer generation over Ollama was
+explored and removed; it lives on a presenter-only branch, not `main`.
 Semantic *chunking* is unrelated and still uses an *embeddings* model, not an
 LLM.
 

@@ -4,14 +4,13 @@ POST /api/chat/reset.
 Same isolation strategy as test_api.py -- a disposable session directory and
 an in-process EphemeralClient per test -- plus a fake embeddings object so
 retrieval's similarity scores are exact numbers this file controls, not
-whatever the real ~90MB model happens to produce. Ollama itself is never
-contacted: `probe`/`stream_answer` are monkeypatched, matching
-test_generator.py's own hermetic style.
+whatever the real ~90MB model happens to produce. No LLM is ever contacted:
+this app runs no generation step at all, so /api/chat always answers
+extractively or with an honest "I don't know".
 """
 
 from __future__ import annotations
 
-import time
 from dataclasses import replace
 
 import chromadb
@@ -20,7 +19,6 @@ from fastapi.testclient import TestClient
 
 import app.main as main_module
 from app.jobs import JobRegistry
-from app.pipeline.generator import GeneratorStatus
 
 
 @pytest.fixture(autouse=True)
@@ -131,11 +129,7 @@ class TestChatAnswerStates:
         assert body["trace"]["pool_size"] == 1
         assert body["trace"]["answerable"] is False
 
-    def test_generation_unavailable_is_extractive_with_exact_citation(self, client, monkeypatch):
-        # Default settings.ollama_base_url is "" -- generation must be
-        # unavailable with no monkeypatching of probe() at all, matching the
-        # app's offline-by-default posture.
-        assert main_module.settings.ollama_base_url == ""
+    def test_answers_are_extractive_with_exact_citations(self, client, monkeypatch):
         use_fake_embeddings(monkeypatch, [1.0, 0.0])
         seed(collection(main_module.settings), [
             ("c1", "Employees get 20 days of annual leave.", [1.0, 0.0],
@@ -147,46 +141,23 @@ class TestChatAnswerStates:
         assert body["answer"]["kind"] == "extractive"
         assert "Employees get 20 days of annual leave." in body["answer"]["text"]
         assert body["answer"]["citations"] == [{"page": 4, "source": "handbook.pdf", "chunk_index": 12}]
-        assert body["generation"]["available"] is False
-        assert body["generation"]["job_id"] is None
         assert body["trace"]["answerable"] is True
 
-    def test_generation_available_streams_through_the_job_registry(self, client, monkeypatch):
-        monkeypatch.setattr(
-            main_module, "settings", replace(main_module.settings, ollama_base_url="http://fake-ollama:11434")
-        )
-        monkeypatch.setattr(main_module.vector_store, "settings", main_module.settings)
+    def test_response_never_carries_a_generation_key_or_kind(self, client, monkeypatch):
+        # Pins the deletion of answer generation: a future reintroduction that
+        # brings back the "generation" key or a "generated" answer kind must
+        # fail this test, not slip back in silently.
         use_fake_embeddings(monkeypatch, [1.0, 0.0])
         seed(collection(main_module.settings), [
             ("c1", "Employees get 20 days of annual leave.", [1.0, 0.0],
              {"source": "handbook.pdf", "page": 4, "chunk_index": 12, "embed_model": "fake-model",
               "doc_id": "d", "strategy": "recursive", "chunk_size": 700, "overlap": 100, "char_count": 39, "parent_id": ""}),
         ])
-        monkeypatch.setattr(
-            main_module, "probe",
-            lambda base_url, model, timeout=2.0: GeneratorStatus(True, model, base_url, ""),
-        )
-        monkeypatch.setattr(
-            main_module, "stream_answer",
-            lambda base_url, model, prompt, timeout=120.0: iter(["20 ", "days."]),
-        )
-
         response = client.post("/api/chat", json={"message": "How much annual leave?"})
         body = response.json()
-        assert body["answer"]["kind"] == "generated"
-        assert body["generation"]["available"] is True
-        job_id = body["generation"]["job_id"]
-        assert job_id
-
-        status = None
-        for _ in range(100):
-            status = client.get(f"/api/status/{job_id}").json()
-            if status["status"] != "running":
-                break
-            time.sleep(0.02)
-        assert status["status"] == "done", status
-        tokens = [e["text"] for e in status["events"] if e["type"] == "token"]
-        assert "".join(tokens) == "20 days."
+        assert "generation" not in body
+        assert body["answer"]["kind"] != "generated"
+        assert set(body.keys()) == {"message_id", "question", "answer", "trace", "history_length"}
 
     def test_blank_message_is_400(self, client):
         assert client.post("/api/chat", json={"message": "   "}).status_code == 400
@@ -380,7 +351,6 @@ class TestChatFrontend:
                 "text": "</script><script>alert(1)</script>",
                 "citations": [],
             },
-            "generation": {"available": False, "model": "m", "detail": "", "job_id": None},
         }]
         main_module.store.save(state)
 

@@ -57,15 +57,6 @@ class Settings:
     retrieval_mmr_lambda: float = 0.5
     retrieval_pool_multiplier: int = 4
 
-    # Backs POST /api/chat's optional generation step: when ollama_base_url is
-    # set and `probe()` reports this model available, the chat streams a real
-    # generated answer through the job registry; otherwise it falls back to an
-    # extractive answer assembled from the retrieved chunks. Unset by default
-    # so the demo works with no network and no Ollama at all. deepseek-r1:1.5b
-    # is the model this repo's tests and CLAUDE.md are written against.
-    ollama_base_url: str = ""
-    ollama_model: str = "deepseek-r1:1.5b"
-
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
         """Build settings from a mapping, defaulting to os.environ."""
@@ -109,8 +100,6 @@ class Settings:
             retrieval_pool_multiplier=number(
                 "RETRIEVAL_POOL_MULTIPLIER", cls.retrieval_pool_multiplier
             ),
-            ollama_base_url=text("OLLAMA_BASE_URL", cls.ollama_base_url),
-            ollama_model=text("OLLAMA_MODEL", cls.ollama_model),
         )
 
     @property

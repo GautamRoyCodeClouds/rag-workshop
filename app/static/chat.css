@@ -122,7 +122,6 @@
 
 /* Kind drives the accent colour of the answer's own role label -- the same
  * "state, not decoration" rule as everywhere else in this system. */
-.msg-a[data-kind='generated'] .msg-role { color: var(--state-active); }
 .msg-a[data-kind='extractive'] .msg-role { color: var(--state-vector); }
 .msg-a[data-kind='unknown'] .msg-role { color: var(--ink-muted); }
 
@@ -141,11 +140,6 @@
   border-radius: var(--r-pill);
   border: 1px solid var(--line);
   color: var(--ink-muted);
-}
-
-.msg-a[data-kind='generated'] .msg-kind-badge {
-  color: var(--state-active);
-  border-color: color-mix(in srgb, var(--state-active) 50%, transparent);
 }
 
 .msg-a[data-kind='extractive'] .msg-kind-badge {
@@ -169,13 +163,6 @@
   font-size: var(--text-xs);
 }
 
-/* A steady cursor while tokens are still arriving -- not a spinner, and not
- * animated: it just marks "this line is still being written". */
-.msg-a-body[data-streaming='true']::after {
-  content: '▍';
-  color: var(--state-active);
-}
-
 .msg-a-citations {
   display: flex;
   flex-wrap: wrap;
@@ -194,10 +181,6 @@
 .msg-a-meta {
   margin-top: var(--sp-4);
   font-size: var(--text-2xs);
-}
-
-.msg-a-error {
-  margin-top: var(--sp-4);
 }
 
 .msg-inspect {
@@ -462,8 +445,3 @@ th {
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .msg-a-body[data-streaming='true']::after {
-    animation: none;
-  }
-}

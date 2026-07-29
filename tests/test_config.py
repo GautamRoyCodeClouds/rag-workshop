@@ -34,8 +34,6 @@ def test_retrieval_defaults():
     assert s.retrieval_min_score == 0.25
     assert s.retrieval_mmr_lambda == 0.5
     assert s.retrieval_pool_multiplier == 4
-    assert s.ollama_model == "deepseek-r1:1.5b"
-    assert s.ollama_base_url == ""
 
 
 def test_retrieval_env_overrides_are_typed():
@@ -44,8 +42,6 @@ def test_retrieval_env_overrides_are_typed():
         "RETRIEVAL_MIN_SCORE": "0.4",
         "RETRIEVAL_MMR_LAMBDA": "0.7",
         "RETRIEVAL_POOL_MULTIPLIER": "6",
-        "OLLAMA_MODEL": "llama3.2:1b",
-        "OLLAMA_BASE_URL": "http://host.docker.internal:11434",
     })
     assert s.retrieval_top_k == 8
     assert isinstance(s.retrieval_top_k, int)
@@ -53,8 +49,6 @@ def test_retrieval_env_overrides_are_typed():
     assert isinstance(s.retrieval_min_score, float)
     assert s.retrieval_mmr_lambda == pytest.approx(0.7)
     assert s.retrieval_pool_multiplier == 6
-    assert s.ollama_model == "llama3.2:1b"
-    assert s.ollama_base_url == "http://host.docker.internal:11434"
 
 
 def test_decimal_empty_string_falls_back_to_default():

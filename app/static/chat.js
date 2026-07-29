@@ -3,11 +3,9 @@
  * This is a second, independent script -- not a second copy of app.js
  * loaded onto this page. app.js wires up ids (`run-chunk`, `run-embed`, ...)
  * that only exist on the ingestion page and would throw as soon as it ran
- * here. What *is* reused is the strategy behind app.js's `follow()`: SSE
- * first, with an exact-once cursor so a fallback to polling never replays or
- * drops an event. That is duplicated below rather than imported, because
- * there is no build step and therefore no module system to import through --
- * see CLAUDE.md's "no build step" rule.
+ * here. This page has no job to follow: /api/chat answers synchronously in
+ * one response, so unlike app.js there is no SSE/poll machinery to
+ * duplicate.
  *
  * As in app.js: every value that came from the server or the database goes
  * through textContent, never innerHTML. Chunk text is arbitrary PDF content
@@ -37,14 +35,6 @@ const UNAVAILABLE_INSPECTOR_MESSAGE =
  * DOM, so a slow response that lands after a newer question (or a reset)
  * cannot write over what the room is now looking at. */
 let operationGeneration = 0;
-const activeFollowers = new Set();
-
-/* The one message body currently receiving streamed tokens, if any. Needed
- * because beginOperation() can cancel a follower mid-stream (the user asked
- * another question, or cleared history) without that follower's own onDone
- * ever running -- see beginOperation() below for why this would otherwise
- * leave a blinking cursor on an abandoned answer forever. */
-let activeStreamBody = null;
 
 const state = {
   traces: new Map(),   // message_id -> RetrievalTrace, for messages asked this page-load
@@ -87,101 +77,12 @@ async function api(path, options = {}) {
   return response.json();
 }
 
-/* ---------------------------------------------------------------------------
- * Job following -- ported from app.js's follow(). See that file's own
- * comment for the full rationale; nothing about the transport logic changes
- * here, only that a chat generation job has no "session" payload to hand
- * back on its terminal event (ingestion jobs return the whole SessionState;
- * this one is just tokens), so callers of follow() below simply ignore that
- * second argument.
- * ------------------------------------------------------------------------ */
-function follow(jobId, onEvent, onDone, generation = operationGeneration) {
-  let cursor = 0;
-  let settled = false;
-  let source = null;
-
-  const current = () => generation === operationGeneration;
-  const cancel = () => {
-    settled = true;
-    if (source) source.close();
-  };
-  activeFollowers.add(cancel);
-
-  const consume = (event, id) => {
-    if (!current() || settled) return;
-    const eventId = Number(id || event.id || 0);
-    if (eventId && eventId <= cursor) return;
-    if (eventId) cursor = eventId;
-    onEvent(event);
-  };
-
-  const finish = (error = '') => {
-    if (settled || !current()) return;
-    settled = true;
-    activeFollowers.delete(cancel);
-    if (source) source.close();
-    onDone(error);
-  };
-
-  const poll = async () => {
-    while (!settled && current()) {
-      let status;
-      try {
-        status = await api(`/api/status/${jobId}?after=${cursor}`);
-      } catch (error) {
-        finish(error.message);
-        return;
-      }
-      status.events.forEach((event) => consume(event, event.id));
-      cursor = Math.max(cursor, Number(status.cursor || 0));
-      if (status.status !== 'running') {
-        const failed = status.status === 'error' || status.status === 'cancelled';
-        finish(failed ? status.error : '');
-        return;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 400));
-    }
-  };
-
-  try {
-    source = new EventSource(`/api/events/${jobId}?after=${cursor}`);
-    source.onmessage = (message) => {
-      let event;
-      try {
-        event = JSON.parse(message.data);
-      } catch {
-        return;
-      }
-      consume(event, message.lastEventId || event.id);
-      if (event.type === 'done' || event.type === 'error' || event.type === 'cancelled') {
-        source.close();
-        poll();
-      }
-    };
-    source.onerror = () => {
-      if (!settled) {
-        source.close();
-        poll();
-      }
-    };
-  } catch {
-    poll();
-  }
-}
-
-/* Start a new user-initiated operation: invalidate the previous one and stop
- * its followers. Also releases the streaming cursor left on an abandoned
- * answer -- cancel() above stops the follower silently (it never calls
- * onDone), so without this a question superseded mid-stream would leave a
- * "still writing" cursor on screen forever. */
+/* Start a new user-initiated operation: invalidate the previous one so a
+ * slow /api/chat response that lands after a newer question (or a reset)
+ * cannot write over what the room is now looking at -- see the
+ * operationGeneration comment above. */
 function beginOperation() {
   operationGeneration += 1;
-  activeFollowers.forEach((cancel) => cancel());
-  activeFollowers.clear();
-  if (activeStreamBody) {
-    delete activeStreamBody.dataset.streaming;
-    activeStreamBody = null;
-  }
   return operationGeneration;
 }
 
@@ -357,10 +258,7 @@ function showInspectorPlaceholder(message) {
   setInspectorEmpty(message);
 }
 
-/* Which message's trace the panel currently shows, so a newly streamed
- * token can tell whether it should keep updating the panel (the user is
- * still looking at *this* answer) or leave it alone (they switched to an
- * older message while this one kept streaming in the background). */
+/* Which message's trace the panel currently shows. */
 let inspecting = null;
 
 function selectInspect(messageId, button) {
@@ -385,10 +283,9 @@ function citationLabel(citation) {
     : `${source} · p.${citation.page}`;
 }
 
-/* One question/answer pair. Handles all four answer.kind values the API can
- * return -- unknown, extractive, generated, and (for a still-streaming
- * generated answer) the empty text a caller fills in afterwards -- from one
- * function, so the four states cannot drift out of sync with each other. */
+/* One question/answer pair. Handles both answer.kind values the API can
+ * return -- unknown and extractive -- from one function, so the two states
+ * cannot drift out of sync with each other. */
 function addMessage(entry) {
   const article = document.createElement('article');
   article.className = 'msg';
@@ -409,10 +306,7 @@ function addMessage(entry) {
   addText(head, 'span', entry.answer.kind, 'msg-kind-badge');
   answer.appendChild(head);
 
-  const body = document.createElement('div');
-  body.className = 'msg-a-body';
-  body.textContent = entry.answer.text;
-  answer.appendChild(body);
+  addText(answer, 'div', entry.answer.text, 'msg-a-body');
 
   if (entry.answer.citations && entry.answer.citations.length) {
     const citations = document.createElement('div');
@@ -425,13 +319,12 @@ function addMessage(entry) {
 
   const meta = document.createElement('div');
   meta.className = 'msg-a-meta muted mono';
-  if (entry.answer.kind === 'generated') {
-    meta.textContent = `Generated by ${entry.generation.model}.`;
-  } else if (entry.answer.kind === 'extractive') {
+  if (entry.answer.kind === 'extractive') {
     // The single most important sentence an extractive answer can carry:
-    // no model wrote this, and here (generation.detail) is why generation
-    // was not attempted or not available.
-    meta.textContent = `No model wrote this -- assembled directly from the retrieved chunks above. ${entry.generation.detail}`;
+    // no model wrote this. This app runs no LLM at all -- the text above is
+    // assembled straight from the retrieved chunks, which is what keeps the
+    // line between "the retriever found this" and "a model said this" visible.
+    meta.textContent = 'No model wrote this -- assembled directly from the retrieved chunks above.';
   }
   if (meta.textContent) answer.appendChild(meta);
 
@@ -455,10 +348,6 @@ function addMessage(entry) {
     answer.appendChild(hint);
   }
 
-  const errorSlot = document.createElement('div');
-  errorSlot.className = 'msg-a-error';
-  answer.appendChild(errorSlot);
-
   const inspectBtn = document.createElement('button');
   inspectBtn.type = 'button';
   inspectBtn.className = 'msg-inspect';
@@ -470,47 +359,7 @@ function addMessage(entry) {
   article.appendChild(answer);
   $('history').appendChild(article);
   $('empty-state').hidden = true;
-  return { body, errorSlot, inspectBtn };
-}
-
-/* ---------------------------------------------------------------------------
- * Streaming a generated answer
- *
- * Only this part of the page streams -- retrieval already ran synchronously
- * by the time addMessage() is called, so the inspector is real, finished
- * data from the first render. Tokens are the one thing genuinely still being
- * produced, over the same job-registry/SSE machinery the ingestion page uses
- * for chunk and embed progress.
- * ------------------------------------------------------------------------ */
-function followGeneration(bodyEl, errorSlot, jobId, generation) {
-  bodyEl.dataset.streaming = 'true';
-  activeStreamBody = bodyEl;
-  let text = '';
-  follow(
-    jobId,
-    (event) => {
-      if (event.type === 'token') {
-        text += event.text;
-        bodyEl.textContent = text;
-      }
-    },
-    (error) => {
-      delete bodyEl.dataset.streaming;
-      if (activeStreamBody === bodyEl) activeStreamBody = null;
-      if (error) {
-        // The retrieval trace already rendered is unaffected -- only the
-        // generation step failed, and the panel above it stays exactly as
-        // informative as it was before the stream broke.
-        addText(
-          errorSlot, 'p',
-          `Generation stopped: ${error} -- the retrieval trace above is still valid.`,
-          'callout warn',
-        );
-      }
-      setInFlight(false);
-    },
-    generation,
-  );
+  return inspectBtn;
 }
 
 /* ---------------------------------------------------------------------------
@@ -557,14 +406,9 @@ async function askQuestion(rawMessage) {
 
   $('message').value = '';
   state.traces.set(response.message_id, response.trace);
-  const { body, errorSlot, inspectBtn } = addMessage(response);
+  const inspectBtn = addMessage(response);
   selectInspect(response.message_id, inspectBtn);
-
-  if (response.answer.kind === 'generated' && response.generation.job_id) {
-    followGeneration(body, errorSlot, response.generation.job_id, generation);
-  } else {
-    setInFlight(false);
-  }
+  setInFlight(false);
 }
 
 $('ask-form').addEventListener('submit', (event) => {

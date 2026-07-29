@@ -41,9 +41,9 @@ class SessionState:
 
     # Chat is a separate, always-reachable feature (see app/main.py's /chat
     # route) that never touches the ingestion pipeline's own state. Each
-    # entry is a plain dict -- message_id, question, answer, generation, and
-    # the full RetrievalTrace as JSON -- not a dataclass, since it is never
-    # read back into typed objects, only replayed to the client as-is.
+    # entry is a plain dict -- message_id, question, answer, and the full
+    # RetrievalTrace as JSON -- not a dataclass, since it is never read back
+    # into typed objects, only replayed to the client as-is.
     chat: list[dict] = field(default_factory=list)
 
     def unlocked_step(self) -> int:

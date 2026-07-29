@@ -128,12 +128,11 @@ first-class, visible outcome rather than an error.
 pipeline — only on something being in ChromaDB. Open it with an empty collection
 and it tells you so.
 
-**Answers are extractive by default.** With no LLM configured the answer *is* the
-retrieved chunks with their citations, which keeps the line between "the
-retriever found this text" and "a model wrote this" visible. To add generation,
-point `OLLAMA_BASE_URL` at a local [Ollama](https://ollama.com) and note the
-catch: Ollama binds to `127.0.0.1`, so it refuses container traffic until you
-start it with `OLLAMA_HOST=0.0.0.0`. See `.env.example`.
+**Answers are extractive.** No LLM runs anywhere in this app: the answer *is*
+the retrieved chunks with their citations, which keeps the line between "the
+retriever found this text" and "a model wrote this" visible. When nothing
+clears the similarity threshold the answer is an honest "I don't know" instead
+of a guess.
 
 ## Bring your own document
 
@@ -173,8 +172,6 @@ change any of them.
 | `RETRIEVAL_MIN_SCORE` | `0.25` | Below this similarity, the answer is "I don't know" |
 | `RETRIEVAL_MMR_LAMBDA` | `0.5` | MMR relevance/diversity balance, 0–1 |
 | `RETRIEVAL_POOL_MULTIPLIER` | `4` | Candidates fetched per requested chunk, so MMR has runners-up |
-| `OLLAMA_BASE_URL` | *(unset)* | Set to enable generated answers; unset means extractive |
-| `OLLAMA_MODEL` | `deepseek-r1:1.5b` | Generation model, when enabled |
 
 ## Tech stack
 
@@ -220,9 +217,8 @@ app/
     embedder.py        batched embedding with real progress
     store.py           ChromaDB writes and reads
     retriever.py       query-time search, MMR, thresholds, the full trace
-    generator.py       optional Ollama answers, reasoning stripped
   templates/, static/  the ingestion page and the chat page
-tests/                 357 tests
+tests/                 245 tests
 rag-workshop.html      the workshop slide deck
 ```
 
